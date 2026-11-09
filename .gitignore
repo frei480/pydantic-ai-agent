@@ -13,3 +13,4 @@ __pycache__/
 # Node/docker build junk
 node_modules/
 docs/
+.mypy_cache/
