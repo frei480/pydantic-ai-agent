@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Локальные данные
+.local/
+*.db
+*.db-*
+
+# Env
+.env
+
+# Node/docker build junk
+node_modules/
+docs/
