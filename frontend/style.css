@@ -130,21 +130,48 @@ html, body {
 .health-indicator {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  color: var(--muted);
-  font-size: 12px;
-  white-space: nowrap;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  cursor: help;
 }
 .health-dot {
-  width: 9px;
-  height: 9px;
-  flex: 0 0 9px;
+  width: 10px;
+  height: 10px;
+  flex: 0 0 10px;
   border-radius: 50%;
   background: #9ca3af;
 }
-.health-indicator.ok .health-dot { background: #16a34a; }
-.health-indicator.down .health-dot { background: #dc2626; }
-.health-indicator.checking .health-dot { background: #d97706; }
+.health-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.health-indicator.ok .health-dot {
+  background: #16a34a;
+  box-shadow: 0 0 7px rgb(22 163 74 / 70%);
+}
+.health-indicator.down .health-dot {
+  background: #dc2626;
+  box-shadow: 0 0 7px rgb(220 38 38 / 70%);
+}
+.health-indicator.checking .health-dot {
+  background: #d97706;
+  box-shadow: 0 0 7px rgb(217 119 6 / 60%);
+  animation: health-pulse 1.2s ease-in-out infinite alternate;
+}
+@keyframes health-pulse {
+  to { opacity: .45; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .health-indicator.checking .health-dot { animation: none; }
+}
 
 #messages {
   flex: 1;
