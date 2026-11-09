@@ -4,15 +4,20 @@ import logging
 import time
 
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Literal
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from openai import APIError
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 from . import agent, db
-from .config import CONTEXT_TOKEN_LIMIT, DB_PATH, DOCS_ROOT, MODEL_NAME
+from .config import (
+    DB_PATH,
+    DEFAULT_CONTEXT_WINDOW_TOKENS,
+    DOCS_ROOT,
+)
 
 dbase = db.Database(DB_PATH)
 logger = logging.getLogger(__name__)
@@ -25,6 +30,18 @@ _model_health_lock = asyncio.Lock()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await dbase.connect()
+    settings = await dbase.get_model_settings()
+    if settings is None:
+        defaults = agent.current_model_settings()
+        await dbase.save_model_settings(
+            defaults.provider,
+            defaults.model,
+            defaults.api_key,
+            defaults.base_url,
+            defaults.context_window_tokens,
+        )
+    else:
+        agent.configure_model(agent.ModelSettings(**settings))
     yield
     await dbase.close()
 
@@ -45,6 +62,65 @@ class MessageIn(BaseModel):
     content: str
 
 
+class ModelSettingsIn(BaseModel):
+    provider: Literal["openai", "openrouter", "ollama", "lmstudio", "custom"]
+    model: str = Field(min_length=1, max_length=200)
+    base_url: str | None = Field(default=None, max_length=2048)
+    api_key: str | None = Field(default=None, max_length=4096)
+    clear_api_key: bool = False
+    context_window_tokens: int = Field(
+        default=DEFAULT_CONTEXT_WINDOW_TOKENS, ge=4096, le=2_000_000
+    )
+
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Укажите название модели")
+        return value
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: str | None, info: ValidationInfo) -> str | None:
+        value = (value or "").strip()
+        if not value:
+            provider = info.data.get("provider")
+            if provider == "openrouter":
+                return "https://openrouter.ai/api/v1"
+            if provider == "ollama":
+                return "http://host.docker.internal:11434/v1"
+            if provider == "lmstudio":
+                return "http://host.docker.internal:1234/v1"
+            if provider == "custom":
+                raise ValueError("Для пользовательского провайдера укажите API-адрес")
+            return None
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("Адрес должен начинаться с http:// или https://")
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise ValueError("Адрес не должен содержать логин, пароль, параметры или фрагмент")
+        try:
+            parsed.port
+        except ValueError as exc:
+            raise ValueError("Порт в API-адресе указан некорректно") from exc
+        return value.rstrip("/")
+
+    @field_validator("api_key")
+    @classmethod
+    def trim_api_key(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None else None
+
+def _settings_out(settings: agent.ModelSettings) -> dict[str, Any]:
+    return {
+        "provider": settings.provider,
+        "model": settings.model,
+        "base_url": settings.base_url or "",
+        "api_key_configured": bool(settings.api_key),
+        "context_window_tokens": settings.context_window_tokens,
+    }
+
+
 def _chat_out(chat: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": chat["id"],
@@ -61,9 +137,8 @@ def _sse(event: dict[str, Any]) -> str:
 def _provider_error_message(exc: Exception) -> str:
     if getattr(exc, "status_code", None) == 429:
         return (
-            "Провайдер ограничил запросы (HTTP 429). Если исчерпана дневная квота "
-            "OpenRouter Free, смените AI_MODEL в .env на модель с доступной квотой "
-            "или пополните баланс OpenRouter, затем перезапустите backend."
+            "Провайдер ограничил запросы (HTTP 429). Проверьте квоту, баланс "
+            "и доступность выбранной модели."
         )
     return str(exc)[:500]
 
@@ -75,18 +150,62 @@ def _provider_error_message(exc: Exception) -> str:
 
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
+    settings = agent.current_model_settings()
     return {
         "status": "ok",
-        "model": MODEL_NAME,
+        "model": settings.model,
+        "provider": settings.provider,
         "docs_root": DOCS_ROOT.name + "/",
-        "context_token_limit": CONTEXT_TOKEN_LIMIT,
+        "context_token_limit": settings.context_window_tokens,
     }
+
+
+@app.get("/api/settings")
+async def get_settings() -> dict[str, Any]:
+    return _settings_out(agent.current_model_settings())
+
+
+@app.put("/api/settings")
+async def update_settings(body: ModelSettingsIn) -> dict[str, Any]:
+    global _model_health_cache, _model_health_checked_at
+    current = agent.current_model_settings()
+    if body.clear_api_key and body.api_key:
+        raise HTTPException(
+            status_code=400, detail="Нельзя одновременно заменить и удалить API-ключ"
+        )
+    api_key = (
+        ""
+        if body.clear_api_key
+        else body.api_key
+        if body.api_key
+        else current.api_key
+    )
+    settings = agent.ModelSettings(
+        provider=body.provider,
+        model=body.model,
+        api_key=api_key,
+        base_url=body.base_url,
+        context_window_tokens=body.context_window_tokens,
+    )
+    async with _model_health_lock:
+        await dbase.save_model_settings(
+            settings.provider,
+            settings.model,
+            settings.api_key,
+            settings.base_url,
+            settings.context_window_tokens,
+        )
+        agent.configure_model(settings)
+        _model_health_cache = None
+        _model_health_checked_at = 0.0
+    return _settings_out(settings)
 
 
 @app.get("/api/health/model")
 async def model_health() -> dict[str, Any]:
     global _model_health_cache, _model_health_checked_at
     async with _model_health_lock:
+        settings = agent.current_model_settings()
         if (
             _model_health_cache is not None
             and time.monotonic() - _model_health_checked_at < MODEL_HEALTH_CACHE_TTL
@@ -99,16 +218,16 @@ async def model_health() -> dict[str, Any]:
             logger.warning("Model health probe failed: %s", exc)
             result = {
                 "status": "error",
-                "model": MODEL_NAME,
+                "model": settings.model,
                 "detail": _provider_error_message(exc),
             }
         else:
             result = (
-                {"status": "ok", "model": MODEL_NAME, "detail": "Модель отвечает"}
+                {"status": "ok", "model": settings.model, "detail": "Модель отвечает"}
                 if responds
                 else {
                     "status": "error",
-                    "model": MODEL_NAME,
+                    "model": settings.model,
                     "detail": "Модель вернула пустой ответ",
                 }
             )

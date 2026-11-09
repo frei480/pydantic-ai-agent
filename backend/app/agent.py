@@ -12,6 +12,7 @@
 """
 
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -22,15 +23,17 @@ from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
 from .config import (
-    CONTEXT_TOKEN_LIMIT,
     CRITIC_MODEL_NAME,
+    DEFAULT_CONTEXT_WINDOW_TOKENS,
     MAX_CRITIC_ROUNDS,
     MODEL_NAME,
     OPENAI_API_KEY,
     OPENAI_BASE_URL,
     OPENAI_MAX_RETRIES,
+    RAW_CRITIC_MODEL,
 )
 from .doc_tools import (
+    ToolOutputBudget,
     count_lines,
     estimate_tokens,
     read_lines,
@@ -40,6 +43,34 @@ from .doc_tools import (
 )
 
 SHOW_LIMIT = 60
+
+
+@dataclass(frozen=True)
+class ModelSettings:
+    provider: str
+    model: str
+    api_key: str
+    base_url: str | None
+    context_window_tokens: int = DEFAULT_CONTEXT_WINDOW_TOKENS
+
+
+_model_settings = ModelSettings(
+    provider="openai",
+    model=MODEL_NAME,
+    api_key=OPENAI_API_KEY,
+    base_url=OPENAI_BASE_URL,
+    context_window_tokens=DEFAULT_CONTEXT_WINDOW_TOKENS,
+)
+
+
+def current_model_settings() -> ModelSettings:
+    return _model_settings
+
+
+def configure_model(settings: ModelSettings) -> None:
+    global _model_settings
+    _model_settings = settings
+
 
 # -------------------------------------------------------------------
 # Инструкции
@@ -52,14 +83,17 @@ RESEARCH_INSTRUCTIONS = """Ты — агент-исследователь API-д
 Твоя задача: найти документацию, необходимую, чтобы написать РАБОЧИЙ код под вопрос пользователя.
 
 Правила работы:
-1. Начинай с широких поисковых запросов через search_docs (ключевые слова из вопроса),
-   затем уточняй запросы. Примеры в документации — C# (классы, свойства, методы, перечисления).
-   Ищи также по именам классов/методов, которые встретились в найденных примерах.
-2. Каждое утверждение подтверждай чтением файла через read_file. НИКОГДА не выдумывай
+1. Начинай исследование с корневых файлов документации: прочитай index.md (оглавление)
+   и search.md (поисковый индекс), используя file_info и read_file. По ним определи
+   релевантные разделы и термины для поиска; только после этого переходи к search_docs.
+2. Используй search_docs для поиска по ключевым словам из вопроса, затем уточняй запросы.
+   Примеры в документации — C# (классы, свойства, методы, перечисления). Ищи также по
+   именам классов/методов, которые встретились в найденных примерах.
+3. Каждое утверждение подтверждай чтением файла через read_file. НИКОГДА не выдумывай
    сигнатуры методов, имена классов, свойства или порядок вызовов.
-3. Перед чтением файла вызывай file_info, чтобы оценить его объём; большие файлы читай
+4. Перед чтением файла вызывай file_info, чтобы оценить его объём; большие файлы читай
    частями через параметры start_line/line_limit.
-4. Состав каталогов смотри через list_dir; полнотекстовый поиск — только через search_docs.
+5. Состав каталогов смотри через list_dir; полнотекстовый поиск — только через search_docs.
 
 В конце хода ОБЯЗАТЕЛЬНО выдай черновик ровно в таком формате:
 ФАКТЫ: (маркированный список подтверждённых фактов, каждый со ссылкой файл:строка)
@@ -113,8 +147,8 @@ class Critique(BaseModel):
 # -------------------------------------------------------------------
 
 
-def _build_model(name: str) -> OpenAIChatModel:
-    provider = _build_provider()
+def _build_model(name: str, settings: ModelSettings | None = None) -> OpenAIChatModel:
+    provider = _build_provider(settings)
     return OpenAIChatModel(name, provider=provider)
 
 
@@ -125,27 +159,33 @@ class _RetryTransientErrorsAsyncOpenAI(AsyncOpenAI):
         return super()._should_retry(response)
 
 
-def _build_provider() -> OpenAIProvider:
+def _build_provider(settings: ModelSettings | None = None) -> OpenAIProvider:
+    settings = settings or current_model_settings()
     client = _RetryTransientErrorsAsyncOpenAI(
-        api_key=OPENAI_API_KEY,
-        base_url=OPENAI_BASE_URL,
+        api_key=settings.api_key or "sk-no-key",
+        base_url=settings.base_url,
         max_retries=OPENAI_MAX_RETRIES,
     )
     return OpenAIProvider(openai_client=client)
 
 
 async def probe_model() -> bool:
-    provider = _build_provider()
+    settings = current_model_settings()
+    provider = _build_provider(settings)
     try:
         response = await provider.client.chat.completions.create(
-            model=MODEL_NAME,
+            model=settings.model,
             messages=[{"role": "user", "content": "Reply with exactly: HEALTH_OK"}],
             max_tokens=8,
             timeout=10,
         )
         return any(
-            choice.message.content and choice.message.content.strip()
-            for choice in response.choices
+            text and text.strip()
+            for choice in response.choices or []
+            for text in (
+                getattr(choice.message, "content", None),
+                getattr(choice.message, "reasoning_content", None),
+            )
         )
     finally:
         await provider.client.close()
@@ -156,7 +196,7 @@ async def probe_model() -> bool:
 # -------------------------------------------------------------------
 
 
-def register_tools(agent: Agent) -> None:
+def register_tools(agent: Agent, budget: ToolOutputBudget) -> None:
     @agent.tool_plain
     async def search_docs(
         pattern: str,
@@ -179,13 +219,13 @@ def register_tools(agent: Agent) -> None:
             case_sensitive=case_sensitive,
         )
         if not results:
-            return (
+            return budget.limit(
                 "Совпадений не найдено. Попробуй другие ключевые слова, "
                 "literal=true или поиск без glob."
             )
         lines = [f"{path}:{n}: {text}" for path, n, text in results]
         header = f"Найдено {len(lines)} совпадений (показано до {SHOW_LIMIT}):"
-        return header + "\n" + "\n".join(lines)
+        return budget.limit(header + "\n" + "\n".join(lines))
 
     @agent.tool_plain
     async def list_dir(path: str) -> str:
@@ -210,7 +250,7 @@ def register_tools(agent: Agent) -> None:
             )
         if hidden:
             out.append(f"Служебные скрытые: {[e.name for e in hidden]}")
-        return "\n".join(out)
+        return budget.limit("\n".join(out))
 
     @agent.tool_plain
     async def file_info(path: str) -> str:
@@ -221,17 +261,18 @@ def register_tools(agent: Agent) -> None:
             raise ValueError(f"{rel_display(p)} — не файл")
         size = p.stat().st_size
         line_count = await count_lines(p)
+        context_window_tokens = budget.context_window_tokens
         tokens = estimate_tokens("x" * size)
-        share = tokens / CONTEXT_TOKEN_LIMIT * 100 if CONTEXT_TOKEN_LIMIT else 0
+        share = tokens / context_window_tokens * 100 if context_window_tokens else 0
         warnings = []
-        if tokens > CONTEXT_TOKEN_LIMIT * 0.5:
+        if tokens > context_window_tokens * 0.5:
             warnings.append(
                 "ФАЙЛ КРУПНЫЙ: чтение целиком переполнит контекстное окно — "
                 "читай частями: read_file(path, start_line, line_limit)."
             )
-        elif tokens > CONTEXT_TOKEN_LIMIT * 0.2:
+        elif tokens > context_window_tokens * 0.2:
             warnings.append("Файл крупный — лучше читать по частям.")
-        return (
+        return budget.limit(
             f"Файл «{rel_display(p)}»: {size} байт, {line_count} строк, "
             f"примерно {tokens} токенов (~{share:.1f}% от контекстного окна). "
             + (" ".join(warnings) if warnings else "")
@@ -249,8 +290,14 @@ def register_tools(agent: Agent) -> None:
         p = safe_resolve(path)
         if not p.is_file():
             raise ValueError(f"{rel_display(p)} — не файл")
+        token_budget = budget.read_token_limit
+        if token_budget <= 0:
+            return budget.limit("Бюджет контекста поиска исчерпан; продолжай по уже найденным фактам.")
         text, start, end, total = await read_lines(
-            p, start_line=start_line, line_limit=line_limit or None
+            p,
+            start_line=start_line,
+            line_limit=line_limit or None,
+            token_budget=token_budget,
         )
         header = f"«{rel_display(p)}», строки {start}–{end} из {total}:"
         if end < total and (line_limit <= 0 or start_line > 1):
@@ -258,7 +305,7 @@ def register_tools(agent: Agent) -> None:
                 f" ПОРЦИЯ УСЕЧЕНА по бюджету контекста. Продолжай: read_file(«{path}», "
                 f"start_line={end + 1}) или прочти отдельные смысловые фрагменты."
             )
-        return header + "\n" + text
+        return budget.limit(header + "\n" + text)
 
 
 # -------------------------------------------------------------------
@@ -312,6 +359,49 @@ async def _iter_agent_turn(
     yield ("result", result)
 
 
+def _is_user_prompt_message(message: Any) -> bool:
+    return getattr(message, "kind", None) == "request" and any(
+        getattr(part, "part_kind", None) == "user-prompt"
+        for part in getattr(message, "parts", ())
+    )
+
+
+def _fit_context(
+    history: list[Any] | None,
+    prompt: str,
+    instructions: str,
+    max_input_tokens: int,
+) -> tuple[list[Any] | None, str, bool, bool]:
+    messages = list(history or [])
+    dropped_history = False
+
+    def input_tokens() -> int:
+        serialized = ModelMessagesTypeAdapter.dump_json(messages).decode("utf-8")
+        return estimate_tokens(serialized + instructions + prompt)
+
+    while messages and input_tokens() > max_input_tokens:
+        prompt_starts = [
+            index for index, message in enumerate(messages) if _is_user_prompt_message(message)
+        ]
+        if len(prompt_starts) > 1:
+            messages = messages[prompt_starts[1] :]
+        else:
+            messages = []
+        dropped_history = True
+
+    prompt_truncated = False
+    if input_tokens() > max_input_tokens:
+        serialized = ModelMessagesTypeAdapter.dump_json(messages).decode("utf-8")
+        available_chars = max(
+            0,
+            max_input_tokens * 4 - len(serialized) - len(instructions) - 64,
+        )
+        prompt = prompt[:available_chars] + "\n[Текст сокращён по лимиту контекста.]"
+        prompt_truncated = True
+
+    return messages or None, prompt, dropped_history, prompt_truncated
+
+
 def _output_of(messages: list[Any]) -> str:
     """Текст последнего сообщения модели (черновик хода)."""
     for msg in reversed(messages):
@@ -331,28 +421,38 @@ async def run_pipeline(
     user_text: str, history_json: str
 ) -> AsyncIterator[dict[str, Any]]:
     """Агентский цикл. Генератор событий для SSE; последнее событие — «final»."""
+    settings = current_model_settings()
+    context_window_tokens = settings.context_window_tokens
+    response_tokens = max(256, context_window_tokens // 5)
+    input_tokens = context_window_tokens - response_tokens - context_window_tokens // 20
+    research_input_tokens = input_tokens - context_window_tokens // 5
+    tool_budget = ToolOutputBudget(context_window_tokens)
+    model_settings = {"max_tokens": response_tokens}
     base_history: list[Any] = []
     if history_json:
         base_history = ModelMessagesTypeAdapter.validate_json(history_json)
 
     researcher = Agent(
-        _build_model(MODEL_NAME),
+        _build_model(settings.model, settings),
         instructions=RESEARCH_INSTRUCTIONS,
+        model_settings=model_settings,
         retries=2,
     )
-    register_tools(researcher)
+    register_tools(researcher, tool_budget)
     critic = Agent(
-        _build_model(CRITIC_MODEL_NAME),
+        _build_model(RAW_CRITIC_MODEL and CRITIC_MODEL_NAME or settings.model, settings),
         instructions=CRITIC_INSTRUCTIONS,
+        model_settings=model_settings,
         output_type=Critique,
         retries=1,
     )
     writer = Agent(
-        _build_model(MODEL_NAME),
+        _build_model(settings.model, settings),
         instructions=WRITER_INSTRUCTIONS,
+        model_settings=model_settings,
         retries=2,
     )
-    register_tools(writer)
+    register_tools(writer, tool_budget)
 
     prompt = user_text
     draft = ""
@@ -363,6 +463,19 @@ async def run_pipeline(
     for round_no in range(1, MAX_CRITIC_ROUNDS + 1):
         # --- фаза: исследование ---
         yield {"type": "phase", "phase": "research", "round": round_no}
+        research_history, prompt, dropped, truncated = _fit_context(
+            research_history, prompt, RESEARCH_INSTRUCTIONS, research_input_tokens
+        )
+        if dropped:
+            yield {
+                "type": "warning",
+                "message": "Старая история чата сокращена, чтобы вместить запрос в окно контекста модели.",
+            }
+        if truncated:
+            yield {
+                "type": "warning",
+                "message": "Текст запроса сокращён, чтобы вместить его в окно контекста модели.",
+            }
         tool_events: list[str] = []
         async for kind, payload in _iter_agent_turn(researcher, prompt, research_history):
             if kind == "text":
@@ -384,6 +497,14 @@ async def run_pipeline(
         critique_input = f"Вопрос пользователя:\n{user_text}\n\nЧерновик фактов:\n{draft}"
         if tool_events:
             critique_input += "\n\nВыполненные поиска:\n" + "\n".join(tool_events[-12:])
+        _, critique_input, _, truncated = _fit_context(
+            None, critique_input, CRITIC_INSTRUCTIONS, input_tokens
+        )
+        if truncated:
+            yield {
+                "type": "warning",
+                "message": "Материалы для проверки сокращены по лимиту контекста модели.",
+            }
         critique_res = await critic.run(critique_input)
         critique: Critique = critique_res.output
         yield {
@@ -398,7 +519,9 @@ async def run_pipeline(
 
         feedback = (
             "Критик отметил пробелы в исследовании. Продолжи поиск и устраняй их.\n"
-            "Недостающая информация:\n- "
+            "Текущий черновик фактов:\n"
+            + draft
+            + "\nНедостающая информация:\n- "
             + "\n- ".join(critique.missing_info[:10] or ["уточнить детали API"])
             + "\nПредложенные поисковые запросы:\n- "
             + "\n- ".join(critique.search_queries[:5] or [])
@@ -414,6 +537,19 @@ async def run_pipeline(
         f"Напиши финальный ответ на вопрос пользователя:\n{user_text}\n\n"
         f"Собранные факты из документации:\n{draft}"
     )
+    research_history, writer_prompt, dropped, truncated = _fit_context(
+        research_history, writer_prompt, WRITER_INSTRUCTIONS, research_input_tokens
+    )
+    if dropped:
+        yield {
+            "type": "warning",
+            "message": "Старая история чата сокращена для подготовки ответа в пределах окна контекста.",
+        }
+    if truncated:
+        yield {
+            "type": "warning",
+            "message": "Часть материалов ответа сокращена по лимиту контекста.",
+        }
     acc: list[str] = []
     writer_all: list[Any] = []
     async with writer.iter(
@@ -431,9 +567,8 @@ async def run_pipeline(
     writer_prefix_len = len(research_history) if research_history else 0
     writer_new = writer_all[writer_prefix_len:] if len(writer_all) > writer_prefix_len else []
 
-    # Накопленная история: базовая история + новые ходы исследователя + ход писателя.
-    full_history = list(base_history)
-    full_history.extend(research_history[len(base_history):])
+    # Сохраняем только историю, которая поместилась в текущее окно модели.
+    full_history = list(research_history or [])
     full_history.extend(writer_new)
     history_out = ModelMessagesTypeAdapter.dump_json(full_history).decode("utf-8")
 

@@ -4,7 +4,7 @@ import sys
 import urllib.request
 from http.server import SimpleHTTPRequestHandler, HTTPServer
 
-FRONT = os.path.join(os.path.dirname(__file__), "..", "frontend")
+FRONT = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
 BACK = os.environ.get("BACKEND", "http://127.0.0.1:8000")
 
 

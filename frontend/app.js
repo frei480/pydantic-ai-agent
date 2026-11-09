@@ -298,7 +298,6 @@ async function sendMessage() {
     let buf = "";
 
     const appendActivity = (line, { rawHtml = false } = {}) => {
-      if (!rawHtml) line = escapeHtml(line);
       activityLines.push({ line, rawHtml });
       if (activityLines.length > 6) {
         // сворачиваем длинный лог в details
@@ -308,7 +307,7 @@ async function sendMessage() {
           "</pre></details>";
       } else {
         activity.innerHTML = activityLines
-          .map(({ line }) => `<div class="line">${line}</div>`)
+          .map(({ line, rawHtml }) => `<div class="line">${rawHtml ? line : escapeHtml(line)}</div>`)
           .join("");
       }
       scrollBottom();

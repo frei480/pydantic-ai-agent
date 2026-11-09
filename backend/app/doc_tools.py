@@ -15,7 +15,6 @@ from typing import Iterable
 from pydantic_ai import ModelRetry
 
 from .config import (
-    CONTEXT_TOKEN_LIMIT,
     DOCS_ROOT,
     READ_TOKEN_BUDGET,
     SEARCH_MAX_RESULTS,
@@ -128,6 +127,32 @@ def estimate_tokens(text: str) -> int:
     return int(len(text) / 4.0) + 1
 
 
+class ToolOutputBudget:
+    """Ограничивает совокупный размер результатов поиска в одном запросе."""
+
+    def __init__(self, context_window_tokens: int):
+        self.context_window_tokens = context_window_tokens
+        self.remaining_tokens = max(1, context_window_tokens // 5)
+
+    @property
+    def read_token_limit(self) -> int:
+        return min(
+            READ_TOKEN_BUDGET,
+            self.remaining_tokens,
+            self.context_window_tokens * 15 // 100,
+        )
+
+    def limit(self, text: str) -> str:
+        remaining_chars = self.remaining_tokens * 4
+        if remaining_chars <= 0:
+            return "Бюджет контекста поиска исчерпан; продолжай по уже найденным фактам."
+        if len(text) > remaining_chars:
+            marker = "\n[результат сокращён: исчерпан бюджет контекста поиска]"
+            text = text[: max(0, remaining_chars - len(marker))] + marker[:remaining_chars]
+        self.remaining_tokens = max(0, self.remaining_tokens - estimate_tokens(text))
+        return text
+
+
 async def count_lines(path: Path) -> int:
     def _count() -> int:
         n = 0
@@ -140,7 +165,10 @@ async def count_lines(path: Path) -> int:
 
 
 async def read_lines(
-    path: Path, start_line: int = 1, line_limit: int | None = None
+    path: Path,
+    start_line: int = 1,
+    line_limit: int | None = None,
+    token_budget: int | None = None,
 ) -> tuple[str, int, int, int]:
     def _read() -> list[str]:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
@@ -150,13 +178,17 @@ async def read_lines(
     lines = await asyncio.to_thread(_read)
     total = len(lines)
     start = max(1, start_line)
-    max_lines = READ_TOKEN_BUDGET * 4 // 60  # приблизительно: строка ~60 символов
+    effective_token_budget = min(
+        READ_TOKEN_BUDGET,
+        token_budget if token_budget is not None else READ_TOKEN_BUDGET,
+    )
+    max_lines = effective_token_budget * 4 // 60  # приблизительно: строка ~60 символов
     if line_limit is not None and line_limit > 0:
         max_lines = min(max_lines, line_limit)
     end = min(total, start - 1 + max_lines)
     selected = "".join(lines[start - 1 : end])
     # дополнительно ужмём по бюджету символов, если строки длинные
-    budget_chars = READ_TOKEN_BUDGET * 4
+    budget_chars = effective_token_budget * 4
     if len(selected) > budget_chars:
         keep = selected[:budget_chars].splitlines(keepends=True)
         selected = "".join(keep)

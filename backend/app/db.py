@@ -3,7 +3,7 @@ from typing import Any
 
 import aiosqlite
 
-from .config import DB_PATH
+from .config import DB_PATH, DEFAULT_CONTEXT_WINDOW_TOKENS
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -22,6 +22,14 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, id);
+CREATE TABLE IF NOT EXISTS model_settings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    api_key TEXT NOT NULL DEFAULT '',
+    base_url TEXT,
+    context_window_tokens INTEGER NOT NULL DEFAULT 120000
+);
 """
 
 
@@ -36,6 +44,13 @@ class Database:
         self._conn.row_factory = aiosqlite.Row
         await self._conn.execute("PRAGMA foreign_keys=ON")
         await self._conn.executescript(SCHEMA)
+        cur = await self._conn.execute("PRAGMA table_info(model_settings)")
+        columns = {row["name"] for row in await cur.fetchall()}
+        if "context_window_tokens" not in columns:
+            await self._conn.execute(
+                "ALTER TABLE model_settings ADD COLUMN context_window_tokens "
+                f"INTEGER NOT NULL DEFAULT {DEFAULT_CONTEXT_WINDOW_TOKENS}"
+            )
         await self._conn.commit()
 
     async def close(self) -> None:
@@ -115,3 +130,39 @@ class Database:
         )
         row = await cur.fetchone()
         return int(row["n"]) if row else 0
+
+    # ---- model settings ----
+
+    async def get_model_settings(self) -> dict[str, Any] | None:
+        cur = await self.conn.execute(
+            """
+            SELECT provider, model, api_key, base_url, context_window_tokens
+            FROM model_settings WHERE id = 1
+            """
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def save_model_settings(
+        self,
+        provider: str,
+        model: str,
+        api_key: str,
+        base_url: str | None,
+        context_window_tokens: int,
+    ) -> None:
+        await self.conn.execute(
+            """
+            INSERT INTO model_settings
+                (id, provider, model, api_key, base_url, context_window_tokens)
+            VALUES (1, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                provider = excluded.provider,
+                model = excluded.model,
+                api_key = excluded.api_key,
+                base_url = excluded.base_url,
+                context_window_tokens = excluded.context_window_tokens
+            """,
+            (provider, model, api_key, base_url, context_window_tokens),
+        )
+        await self.conn.commit()

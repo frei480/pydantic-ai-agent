@@ -14,7 +14,7 @@ CRITIC_MODEL_NAME = (
     if RAW_CRITIC_MODEL.lower().startswith("openai:")
     else (RAW_CRITIC_MODEL or MODEL_NAME)
 )
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip() or "sk-no-key"
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_BASE_URL = (os.getenv("OPENAI_BASE_URL") or "").strip() or None
 OPENAI_MAX_RETRIES = max(0, int(os.getenv("OPENAI_MAX_RETRIES", "5")))
 
@@ -23,6 +23,7 @@ OPENAI_MAX_RETRIES = max(0, int(os.getenv("OPENAI_MAX_RETRIES", "5")))
 CHARS_PER_TOKEN = 4.0
 # Бюджет входного контекста модели (для file_info)
 CONTEXT_TOKEN_LIMIT = int(os.getenv("CONTEXT_TOKEN_LIMIT", "120000"))
+DEFAULT_CONTEXT_WINDOW_TOKENS = CONTEXT_TOKEN_LIMIT
 # Одна порция чтения файла (в токенах)
 READ_TOKEN_BUDGET = int(os.getenv("READ_TOKEN_BUDGET", "20000"))
 
