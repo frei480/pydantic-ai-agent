@@ -1,0 +1,4 @@
+pydantic-ai-slim[openai]>=1.0
+fastapi>=0.115
+uvicorn[standard]>=0.30
+aiosqlite>=0.20
