@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Docs AI Agent</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <div id="brand">Docs&nbsp;AI&nbsp;Agent</div>
+    <button id="new-chat" title="Новый чат">＋ Новый чат</button>
+    <nav id="chat-list" aria-label="Чаты"></nav>
+  </aside>
+
+  <main id="main">
+    <header id="topbar">
+      <span id="chat-title">Новый чат</span>
+      <span id="status" hidden></span>
+      <div id="health-indicators" aria-label="Состояние сервисов">
+        <span id="backend-health" class="health-indicator checking" role="status" aria-live="polite">
+          <span class="health-dot" aria-hidden="true"></span>
+          <span class="health-label">Backend: проверка</span>
+        </span>
+        <span id="model-health" class="health-indicator checking" role="status" aria-live="polite">
+          <span class="health-dot" aria-hidden="true"></span>
+          <span class="health-label">Модель: проверка</span>
+        </span>
+      </div>
+    </header>
+
+    <div id="messages"></div>
+
+    <form id="composer">
+      <textarea id="input" placeholder="Спросите о API…" rows="1" autocomplete="off"></textarea>
+      <button id="send" type="submit" title="Отправить">➤</button>
+    </form>
+  </main>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
