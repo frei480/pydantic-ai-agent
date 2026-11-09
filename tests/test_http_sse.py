@@ -1,8 +1,10 @@
 """E2E-тест HTTP-слоя: uvicorn + SSE поверх мок-LLM (tests/mock_llm_server.py)."""
 import json
 import os
+import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 
@@ -10,9 +12,15 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 
-def start_bg(script, env):
+def free_port():
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def start_bg(script, env, *args):
     return subprocess.Popen(
-        [sys.executable, "-X", "utf8", script],
+        [sys.executable, "-X", "utf8", script, *args],
         cwd=ROOT,
         env=env,
         stdout=subprocess.PIPE,
@@ -20,25 +28,27 @@ def start_bg(script, env):
     )
 
 
+mock_port = free_port()
+server_port = free_port()
+temp_dir = tempfile.TemporaryDirectory()
 env = dict(os.environ)
 env.update(
     {
         "DOCS_ROOT": os.path.join(ROOT, "docs"),
         "OPENAI_API_KEY": "sk-dummy",
-        "OPENAI_BASE_URL": "http://127.0.0.1:3999/v1",
+        "OPENAI_BASE_URL": f"http://127.0.0.1:{mock_port}/v1",
         "AI_MODEL": "mock-model",
         "MOCK_502_FAILURES": "2",
         "OPENAI_MAX_RETRIES": "3",
-        "DB_PATH": os.path.join(ROOT, ".local", "chats_http.db"),
+        "DB_PATH": os.path.join(temp_dir.name, "chats_http.db"),
         "PYDANTIC_AI_NO_BANNER": "1",
     }
 )
 
-mock = start_bg("tests/mock_llm_server.py", env)
+mock = start_bg("tests/mock_llm_server.py", env, str(mock_port))
 time.sleep(0.5)
 
-env["DB_PATH"] = os.path.join(ROOT, ".local", "chats_http2.db")
-server_port = 18001
+env["DB_PATH"] = os.path.join(temp_dir.name, "chats_http2.db")
 env["PORT"] = str(server_port)
 server = start_bg("backend/run_server.py", env)
 base_url = f"http://127.0.0.1:{server_port}"
@@ -94,7 +104,7 @@ try:
     types = [e["type"] for e in events]
     print("event types:", types[:10], "…total", len(types))
     # финальный текст стримится как text; final в SSE не отсылается, он сохраняется в БД
-    assert "done" in types and "text" in types
+    assert "done" in types and "text" in types, events
 
     msgs = json.loads(
         urllib.request.urlopen(
@@ -111,3 +121,4 @@ finally:
             proc.wait(timeout=10)
         except Exception:
             proc.kill()
+    temp_dir.cleanup()
