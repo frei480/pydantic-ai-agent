@@ -13,12 +13,13 @@
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any
+from typing import Literal
 
+from httpx2 import Response
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, messages as ai_messages
-from pydantic_ai.messages import ModelMessagesTypeAdapter
+from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
@@ -103,20 +104,25 @@ RESEARCH_INSTRUCTIONS = """Ты — агент-исследователь API-д
 Отвечай на языке пользователя (по умолчанию — русский).
 """
 
-CRITIC_INSTRUCTIONS = """Ты — строгий технический критик результата исследования документации API.
+CRITIC_INSTRUCTIONS = """Ты — практичный технический критик результата исследования документации API.
 Тебе дан вопрос пользователя и черновик фактов, найденных агентом-исследователем.
 
-Оцени черновик по критериям:
-- достаточность: хватит ли сведений, чтобы написать РАБОЧИЙ код требуемого;
-- подтверждённость: все классы/методы/свойства и сигнатуры снабжены ссылками файл:строка;
-- полнота: понятен ли сценарий работы с API (получение документа, создание объектов,
-  начало/конец транзакции изменений, владельцы объектов), учтены ли зависимости и перечисления;
-- согласованность: не смешаны ли разные подсистемы/версии API.
+Определи, достаточно ли фактов именно для ответа на вопрос пользователя, а не для
+исчерпывающего описания всей подсистемы API. Учитывай масштаб задачи: для небольшого
+примера не требуй деталей полного сценария приложения.
 
-Верди is_sufficient=true ТОЛЬКО если все критерии выполнены и ты уверен, что по этим фактам
-можно собрать рабочий код. Иначе перечисли в missing_info конкретные пробелы, а в
-search_queries предложи 1-5 конкретных поисковых запросов (ключевые слова или regex для
-ripgrep), которые закроют пробелы. Не дублируй в suggestions уже найденное."""
+Ставь is_sufficient=true, если основную задачу можно объяснить и дать полезный код
+на основе подтверждённых фактов, даже если второстепенные детали неизвестны. Не требуй
+обязательно описывать получение документа, транзакции, владельцев объектов, зависимости
+или перечисления — проверяй их только когда они действительно нужны для запрошенного
+сценария. Не считай отсутствие ссылки у второстепенного факта блокирующим пробелом.
+
+Ставь is_sufficient=false только при существенном пробеле, из-за которого ответ или
+ключевая часть кода с высокой вероятностью окажется неверной либо неприменимой, или при
+противоречии в найденных фактах. В этом случае перечисли в missing_info только такие
+существенные пробелы и предложи 1-3 точных поисковых запроса в search_queries.
+Не проси дополнительные поиски «на всякий случай». Если детали несущественны, отметь
+неопределённость в comments и разреши писателю явно оговорить её в ответе."""
 
 WRITER_INSTRUCTIONS = """Ты — инженер-технический писатель. По вопросу пользователя и фактам,
 собранным из документации API (в контексте), напиши ФИНАЛЬНЫЙ ответ:
@@ -153,7 +159,7 @@ def _build_model(name: str, settings: ModelSettings | None = None) -> OpenAIChat
 
 
 class _RetryTransientErrorsAsyncOpenAI(AsyncOpenAI):
-    def _should_retry(self, response: Any) -> bool:
+    def _should_retry(self, response: Response) -> bool:
         if response.status_code == 429:
             return response.headers.get("x-should-retry") == "true"
         return super()._should_retry(response)
@@ -334,8 +340,8 @@ class TurnResult:
 
 
 async def _iter_agent_turn(
-    agent: Agent, prompt: str, history: list[Any] | None
-) -> AsyncIterator[tuple[str, Any]]:
+    agent: Agent, prompt: str, history: list[ModelMessage] | None
+) -> AsyncIterator[tuple[Literal["text", "tool"], str] | tuple[Literal["result"], TurnResult]]:
     """Один ход агента: события (text|tool|result); в конце ('messages', json)."""
     result = TurnResult()
     async with agent.iter(user_prompt=prompt, message_history=history) as run:
@@ -359,7 +365,7 @@ async def _iter_agent_turn(
     yield ("result", result)
 
 
-def _is_user_prompt_message(message: Any) -> bool:
+def _is_user_prompt_message(message: ModelMessage) -> bool:
     return getattr(message, "kind", None) == "request" and any(
         getattr(part, "part_kind", None) == "user-prompt"
         for part in getattr(message, "parts", ())
@@ -367,11 +373,11 @@ def _is_user_prompt_message(message: Any) -> bool:
 
 
 def _fit_context(
-    history: list[Any] | None,
+    history: list[ModelMessage] | None,
     prompt: str,
     instructions: str,
     max_input_tokens: int,
-) -> tuple[list[Any] | None, str, bool, bool]:
+) -> tuple[list[ModelMessage] | None, str, bool, bool]:
     messages = list(history or [])
     dropped_history = False
 
@@ -402,7 +408,7 @@ def _fit_context(
     return messages or None, prompt, dropped_history, prompt_truncated
 
 
-def _output_of(messages: list[Any]) -> str:
+def _output_of(messages: list[ModelMessage]) -> str:
     """Текст последнего сообщения модели (черновик хода)."""
     for msg in reversed(messages):
         if getattr(msg, "parts", None):
@@ -419,7 +425,7 @@ def _output_of(messages: list[Any]) -> str:
 
 async def run_pipeline(
     user_text: str, history_json: str
-) -> AsyncIterator[dict[str, Any]]:
+) -> AsyncIterator[dict[str, object]]:
     """Агентский цикл. Генератор событий для SSE; последнее событие — «final»."""
     settings = current_model_settings()
     context_window_tokens = settings.context_window_tokens
@@ -428,7 +434,7 @@ async def run_pipeline(
     research_input_tokens = input_tokens - context_window_tokens // 5
     tool_budget = ToolOutputBudget(context_window_tokens)
     model_settings = {"max_tokens": response_tokens}
-    base_history: list[Any] = []
+    base_history: list[ModelMessage] = []
     if history_json:
         base_history = ModelMessagesTypeAdapter.validate_json(history_json)
 
@@ -444,7 +450,7 @@ async def run_pipeline(
         instructions=CRITIC_INSTRUCTIONS,
         model_settings=model_settings,
         output_type=Critique,
-        retries=1,
+        retries=2,
     )
     writer = Agent(
         _build_model(settings.model, settings),
@@ -456,7 +462,7 @@ async def run_pipeline(
 
     prompt = user_text
     draft = ""
-    research_history: list[Any] | None = base_history or None
+    research_history: list[ModelMessage] | None = base_history or None
     research_messages_json = b""
     round_no = 1
 
@@ -478,12 +484,13 @@ async def run_pipeline(
             }
         tool_events: list[str] = []
         async for kind, payload in _iter_agent_turn(researcher, prompt, research_history):
-            if kind == "text":
+            if kind == "text" and isinstance(payload, str):
                 yield {"type": "draft", "text": payload}
-            elif kind == "tool":
+            elif kind == "tool" and isinstance(payload, str):
                 tool_events.append(payload)
                 yield {"type": "tool", "detail": payload}
-            else:
+            elif kind == "result":
+                assert isinstance(payload, TurnResult)
                 draft = payload.output
                 research_messages_json = payload.messages_json
         research_history = (
@@ -551,7 +558,7 @@ async def run_pipeline(
             "message": "Часть материалов ответа сокращена по лимиту контекста.",
         }
     acc: list[str] = []
-    writer_all: list[Any] = []
+    writer_all: list[ModelMessage] = []
     async with writer.iter(
         user_prompt=writer_prompt, message_history=research_history
     ) as wrun:

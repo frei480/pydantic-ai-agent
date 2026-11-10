@@ -1,9 +1,10 @@
 import json
-from typing import Any
 
 import aiosqlite
 
+from .models import Chat, ChatSummary, Message, ModelSettings
 from .config import DB_PATH, DEFAULT_CONTEXT_WINDOW_TOKENS
+
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -65,11 +66,19 @@ class Database:
 
     # ---- chats ----
 
-    async def list_chats(self) -> list[dict[str, Any]]:
+    async def list_chats(self) -> list[ChatSummary]:
         cur = await self.conn.execute(
             "SELECT id, title, created_at, updated_at FROM chats ORDER BY updated_at DESC, id DESC"
         )
-        return [dict(r) for r in await cur.fetchall()]
+        return [
+            ChatSummary(
+                id=row["id"],
+                title=row["title"],
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+            )
+            for row in await cur.fetchall()
+        ]
 
     async def create_chat(self, title: str = "Новый чат") -> int:
         cur = await self.conn.execute(
@@ -78,10 +87,18 @@ class Database:
         await self.conn.commit()
         return cur.lastrowid  # type: ignore[return-value]
 
-    async def get_chat(self, chat_id: int) -> dict[str, Any] | None:
+    async def get_chat(self, chat_id: int) -> Chat | None:
         cur = await self.conn.execute("SELECT * FROM chats WHERE id = ?", (chat_id,))
         row = await cur.fetchone()
-        return dict(row) if row else None
+        if row is None:
+            return None
+        return Chat(
+            id=row["id"],
+            title=row["title"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            history_json=row["history_json"],
+        )
 
     async def delete_chat(self, chat_id: int) -> None:
         await self.conn.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
@@ -100,7 +117,7 @@ class Database:
         )
         await self.conn.commit()
 
-    async def set_history(self, chat_id: int, messages: list[Any]) -> None:
+    async def set_history(self, chat_id: int, messages: list[object]) -> None:
         raw = json.dumps(messages)  # pydantic-ai messages: list[dict]
         await self.conn.execute(
             "UPDATE chats SET history_json = ? WHERE id = ?", (raw, chat_id)
@@ -109,12 +126,20 @@ class Database:
 
     # ---- messages ----
 
-    async def get_messages(self, chat_id: int) -> list[dict[str, Any]]:
+    async def get_messages(self, chat_id: int) -> list[Message]:
         cur = await self.conn.execute(
             "SELECT id, role, content, created_at FROM messages WHERE chat_id = ? ORDER BY id",
             (chat_id,),
         )
-        return [dict(r) for r in await cur.fetchall()]
+        return [
+            Message(
+                id=row["id"],
+                role=row["role"],
+                content=row["content"],
+                created_at=row["created_at"],
+            )
+            for row in await cur.fetchall()
+        ]
 
     async def add_message(self, chat_id: int, role: str, content: str) -> int:
         cur = await self.conn.execute(
@@ -133,7 +158,7 @@ class Database:
 
     # ---- model settings ----
 
-    async def get_model_settings(self) -> dict[str, Any] | None:
+    async def get_model_settings(self) -> ModelSettings | None:
         cur = await self.conn.execute(
             """
             SELECT provider, model, api_key, base_url, context_window_tokens
@@ -141,7 +166,15 @@ class Database:
             """
         )
         row = await cur.fetchone()
-        return dict(row) if row else None
+        if row is None:
+            return None
+        return ModelSettings(
+            provider=row["provider"],
+            model=row["model"],
+            api_key=row["api_key"],
+            base_url=row["base_url"],
+            context_window_tokens=row["context_window_tokens"],
+        )
 
     async def save_model_settings(
         self,

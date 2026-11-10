@@ -4,7 +4,7 @@ import logging
 import time
 
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Literal
+from typing import AsyncIterator, Literal, TypedDict
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException
@@ -12,7 +12,7 @@ from fastapi.responses import StreamingResponse
 from openai import APIError
 from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
-from . import agent, db
+from . import agent, db, models
 from .config import (
     DB_PATH,
     DEFAULT_CONTEXT_WINDOW_TOKENS,
@@ -22,7 +22,43 @@ from .config import (
 dbase = db.Database(DB_PATH)
 logger = logging.getLogger(__name__)
 MODEL_HEALTH_CACHE_TTL = 60 * 60
-_model_health_cache: dict[str, Any] | None = None
+
+
+class SettingsOut(TypedDict):
+    provider: str
+    model: str
+    base_url: str
+    api_key_configured: bool
+    context_window_tokens: int
+
+
+class ChatOut(TypedDict):
+    id: int
+    title: str
+    created_at: str
+    updated_at: str
+
+
+class HealthOut(TypedDict):
+    status: Literal["ok"]
+    model: str
+    provider: str
+    docs_root: str
+    context_token_limit: int
+
+
+class ModelHealthOut(TypedDict):
+    status: Literal["ok", "error"]
+    model: str
+    detail: str
+
+
+class ChatMessagesOut(TypedDict):
+    chat: ChatOut
+    messages: list[models.Message]
+
+
+_model_health_cache: ModelHealthOut | None = None
 _model_health_checked_at = 0.0
 _model_health_lock = asyncio.Lock()
 
@@ -111,7 +147,7 @@ class ModelSettingsIn(BaseModel):
     def trim_api_key(cls, value: str | None) -> str | None:
         return value.strip() if value is not None else None
 
-def _settings_out(settings: agent.ModelSettings) -> dict[str, Any]:
+def _settings_out(settings: agent.ModelSettings) -> SettingsOut:
     return {
         "provider": settings.provider,
         "model": settings.model,
@@ -121,7 +157,7 @@ def _settings_out(settings: agent.ModelSettings) -> dict[str, Any]:
     }
 
 
-def _chat_out(chat: dict[str, Any]) -> dict[str, Any]:
+def _chat_out(chat: models.ChatSummary) -> ChatOut:
     return {
         "id": chat["id"],
         "title": chat["title"],
@@ -130,7 +166,7 @@ def _chat_out(chat: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _sse(event: dict[str, Any]) -> str:
+def _sse(event: dict[str, object]) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
 
@@ -149,7 +185,7 @@ def _provider_error_message(exc: Exception) -> str:
 
 
 @app.get("/api/health")
-async def health() -> dict[str, Any]:
+async def health() -> HealthOut:
     settings = agent.current_model_settings()
     return {
         "status": "ok",
@@ -161,12 +197,12 @@ async def health() -> dict[str, Any]:
 
 
 @app.get("/api/settings")
-async def get_settings() -> dict[str, Any]:
+async def get_settings() -> SettingsOut:
     return _settings_out(agent.current_model_settings())
 
 
 @app.put("/api/settings")
-async def update_settings(body: ModelSettingsIn) -> dict[str, Any]:
+async def update_settings(body: ModelSettingsIn) -> SettingsOut:
     global _model_health_cache, _model_health_checked_at
     current = agent.current_model_settings()
     if body.clear_api_key and body.api_key:
@@ -202,7 +238,7 @@ async def update_settings(body: ModelSettingsIn) -> dict[str, Any]:
 
 
 @app.get("/api/health/model")
-async def model_health() -> dict[str, Any]:
+async def model_health() -> ModelHealthOut:
     global _model_health_cache, _model_health_checked_at
     async with _model_health_lock:
         settings = agent.current_model_settings()
@@ -216,7 +252,7 @@ async def model_health() -> dict[str, Any]:
             responds = await agent.probe_model()
         except APIError as exc:
             logger.warning("Model health probe failed: %s", exc)
-            result = {
+            result: ModelHealthOut = {
                 "status": "error",
                 "model": settings.model,
                 "detail": _provider_error_message(exc),
@@ -237,27 +273,29 @@ async def model_health() -> dict[str, Any]:
 
 
 @app.get("/api/chats")
-async def list_chats():
+async def list_chats() -> list[ChatOut]:
     return [_chat_out(c) for c in await dbase.list_chats()]
 
 
 @app.post("/api/chats")
-async def create_chat(body: ChatIn):
+async def create_chat(body: ChatIn) -> ChatOut:
     chat_id = await dbase.create_chat(title=body.title.strip() or "Новый чат")
     chat = await dbase.get_chat(chat_id)
+    if chat is None:
+        raise RuntimeError(f"created chat {chat_id} could not be loaded")
     return _chat_out(chat)
 
 
 @app.delete("/api/chats/{chat_id}")
-async def delete_chat(chat_id: int):
+async def delete_chat(chat_id: int) -> dict[str, bool]:
     await dbase.delete_chat(chat_id)
     return {"ok": True}
 
 
 @app.get("/api/chats/{chat_id}/messages")
-async def get_messages(chat_id: int):
+async def get_messages(chat_id: int) -> ChatMessagesOut:
     chat = await dbase.get_chat(chat_id)
-    if not chat:
+    if chat is None:
         raise HTTPException(status_code=404, detail="chat not found")
     return {
         "chat": _chat_out(chat),
@@ -272,7 +310,7 @@ async def post_message(chat_id: int, body: MessageIn) -> StreamingResponse:
     if not content:
         raise HTTPException(status_code=400, detail="Пустое сообщение")
     chat = await dbase.get_chat(chat_id)
-    if not chat:
+    if chat is None:
         raise HTTPException(status_code=404, detail="chat not found")
 
     # Сохраняем сообщение пользователя и задаём заголовок чата по первому сообщению.
@@ -288,8 +326,12 @@ async def post_message(chat_id: int, body: MessageIn) -> StreamingResponse:
         try:
             async for event in agent.run_pipeline(content, history_json):
                 if event["type"] == "final":
-                    final_text = event["text"]
-                    history_json = event["history_json"]
+                    text = event.get("text")
+                    history = event.get("history_json")
+                    if not isinstance(text, str) or not isinstance(history, str):
+                        raise RuntimeError("pipeline returned an invalid final event")
+                    final_text = text
+                    history_json = history
                     continue
                 yield _sse(event)
         except Exception as exc:  # noqa: BLE001 — наружу клиенту только краткость
