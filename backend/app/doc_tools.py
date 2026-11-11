@@ -163,6 +163,24 @@ def bm25_rank_documents(
     return sorted(ranked, key=lambda result: (-result[0], result[1].casefold()))
 
 
+def find_relevant_heading_line(path: Path, query: str) -> int | None:
+    """Find the most query-relevant Markdown heading in a document."""
+    headings: list[tuple[int, str]] = []
+    with path.open("r", encoding="utf-8", errors="replace") as file:
+        for line_no, line in enumerate(file, start=1):
+            if re.match(r"^\s{0,3}#{1,6}\s+\S", line):
+                headings.append((line_no, line.strip()))
+    if not headings:
+        return None
+    ranked = bm25_rank_documents(
+        query,
+        [(f"line {line_no}", heading) for line_no, heading in headings],
+    )
+    if not ranked or ranked[0][0] <= 0:
+        return None
+    return int(ranked[0][1].split()[1])
+
+
 async def ripgrep_search(
     pattern: str,
     *,
@@ -348,7 +366,7 @@ class ToolOutputBudget:
 
     def __init__(self, context_window_tokens: int):
         self.context_window_tokens = context_window_tokens
-        self.remaining_tokens = max(1, context_window_tokens // 12)
+        self.remaining_tokens = max(1, context_window_tokens // 5)
         self.seen_calls: set[tuple[object, ...]] = set()
         self.tool_calls = 0
         self.max_tool_calls = 16
@@ -374,7 +392,15 @@ class ToolOutputBudget:
         return True
 
     def limit(self, text: str) -> str:
-        remaining_chars = int(self.remaining_tokens * CHARS_PER_TOKEN)
+        return self._limit(text, reserve_tokens=0)
+
+    def limit_metadata(self, text: str, *, reserve_tokens: int | None = None) -> str:
+        reserve = self.read_token_limit if reserve_tokens is None else reserve_tokens
+        return self._limit(text, reserve_tokens=reserve)
+
+    def _limit(self, text: str, *, reserve_tokens: int) -> str:
+        available_tokens = max(0, self.remaining_tokens - reserve_tokens)
+        remaining_chars = int(available_tokens * CHARS_PER_TOKEN)
         if remaining_chars <= 0:
             return "Бюджет контекста поиска исчерпан; продолжай по уже найденным фактам."
         if len(text) > remaining_chars:

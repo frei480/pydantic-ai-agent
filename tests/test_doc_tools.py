@@ -123,10 +123,31 @@ def check_search_case_sensitivity():
     assert [line for _, line, _ in sensitive] == [2]
 
 
+def check_relevant_heading_lookup():
+    with tempfile.TemporaryDirectory() as directory:
+        source = Path(directory) / "guide.md"
+        source.write_text(
+            "# General\n\nUnrelated text.\n\n"
+            "## Работа со строковыми параметрами в формате rtf\n\nExample.\n",
+            encoding="utf-8",
+        )
+        line = doc_tools.find_relevant_heading_line(
+            source, "работа с параметрами содержащими текст в формате rtf"
+        )
+
+    assert line == 5
+
+
 def check_tool_call_budget():
     budget = doc_tools.ToolOutputBudget(25_600)
     key = ("read_file", "TFlexDOCs API/example.md", 1, 0)
 
+    assert budget.remaining_tokens == 5_120
+    assert budget.read_token_limit == 1_280
+    metadata = budget.limit_metadata(
+        "x" * 20_000, reserve_tokens=budget.read_token_limit + 512
+    )
+    assert len(metadata) <= (5_120 - 1_792) * 2
     assert budget.read_token_limit == 1_280
     assert not budget.is_duplicate_call(key)
     assert budget.is_duplicate_call(key)
@@ -176,6 +197,7 @@ check_search_pagination()
 check_absolute_windows_path_resolution()
 check_conservative_russian_read_budget()
 check_search_case_sensitivity()
+check_relevant_heading_lookup()
 check_tool_call_budget()
 check_bm25_ranking()
 print("DOC-TOOLS-OK")
