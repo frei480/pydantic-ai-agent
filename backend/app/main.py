@@ -19,7 +19,7 @@ from .config import (
     DOCS_ROOT,
 )
 
-dbase = db.Database(DB_PATH)
+dbase = db.Database(str(DB_PATH))
 logger = logging.getLogger(__name__)
 MODEL_HEALTH_CACHE_TTL = 60 * 60
 
