@@ -13,12 +13,18 @@
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from httpx2 import Response
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent, messages as ai_messages
+from pydantic_ai import (
+    Agent,
+    AgentRun,
+    ModelRequestNode,
+    ModelSettings as PydanticModelSettings,
+    messages as ai_messages,
+)
 from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
@@ -296,7 +302,7 @@ def register_tools(agent: Agent, budget: ToolOutputBudget) -> None:
         context_window_tokens = budget.context_window_tokens
         tokens = estimate_tokens("x" * size)
         share = tokens / context_window_tokens * 100 if context_window_tokens else 0
-        warnings = []
+        warnings: list[str] = []
         if tokens > context_window_tokens * 0.5:
             warnings.append(
                 "ФАЙЛ КРУПНЫЙ: чтение целиком переполнит контекстное окно — "
@@ -345,7 +351,9 @@ def register_tools(agent: Agent, budget: ToolOutputBudget) -> None:
 # -------------------------------------------------------------------
 
 
-async def _stream_text(node, run) -> AsyncIterator[str]:
+async def _stream_text(
+    node: ModelRequestNode[Any, Any], run: AgentRun[Any, Any]
+) -> AsyncIterator[str]:
     """Дельты текста из узла модельного запроса (pydantic-ai v2)."""
     async with node.stream(run.ctx) as stream:
         async for event in stream:
@@ -459,7 +467,7 @@ async def run_pipeline(
     input_tokens = context_window_tokens - response_tokens - context_window_tokens // 20
     research_input_tokens = input_tokens - context_window_tokens // 5
     tool_budget = ToolOutputBudget(context_window_tokens)
-    model_settings = {"max_tokens": response_tokens}
+    model_settings: PydanticModelSettings = {"max_tokens": response_tokens}
     base_history: list[ModelMessage] = []
     if history_json:
         base_history = ModelMessagesTypeAdapter.validate_json(history_json)
