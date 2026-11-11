@@ -17,10 +17,11 @@ CRITIC_MODEL_NAME = (
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_BASE_URL = (os.getenv("OPENAI_BASE_URL") or "").strip() or None
 OPENAI_MAX_RETRIES = max(0, int(os.getenv("OPENAI_MAX_RETRIES", "5")))
+AGENT_REQUEST_LIMIT = max(1, int(os.getenv("AGENT_REQUEST_LIMIT", "100")))
 
 # --- лимиты контекста ---
-# Оценка объёма: ~4 символа = 1 токен
-CHARS_PER_TOKEN = 4.0
+# Консервативная оценка для смешанного текста, включая русский: 2 символа на токен.
+CHARS_PER_TOKEN = 2.0
 # Бюджет входного контекста модели (для file_info)
 CONTEXT_TOKEN_LIMIT = int(os.getenv("CONTEXT_TOKEN_LIMIT", "120000"))
 DEFAULT_CONTEXT_WINDOW_TOKENS = CONTEXT_TOKEN_LIMIT

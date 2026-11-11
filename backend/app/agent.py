@@ -21,8 +21,10 @@ from pydantic import BaseModel, Field
 from pydantic_ai import (
     Agent,
     AgentRun,
+    ModelRetry,
     ModelRequestNode,
     ModelSettings as PydanticModelSettings,
+    UsageLimits,
     messages as ai_messages,
 )
 from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter
@@ -30,8 +32,10 @@ from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
 from .config import (
+    CHARS_PER_TOKEN,
     CRITIC_MODEL_NAME,
     DEFAULT_CONTEXT_WINDOW_TOKENS,
+    AGENT_REQUEST_LIMIT,
     MAX_CRITIC_ROUNDS,
     MODEL_NAME,
     OPENAI_API_KEY,
@@ -48,9 +52,6 @@ from .doc_tools import (
     ripgrep_search,
     safe_resolve,
 )
-
-SHOW_LIMIT = 60
-
 
 @dataclass(frozen=True)
 class ModelSettings:
@@ -98,17 +99,30 @@ T-FLEX CAD (геометрия и CAD-документы) или T-FLEX DOCs (м
    нужна. Для T-FLEX DOCs это может быть контекст макроса, справочник/объект, параметры,
    связи, жизненный цикл объекта, ServerConnection, UI, стадии/подписи, отчёты или
    процессы. Это подсказки для выбора направления поиска, а не подтверждение API.
-2. В выбранном каталоге проверь index.md и при необходимости search.md через file_info.
-   Используй оглавление и точечные поисковые запросы по терминам, не читай огромный
-   поисковый индекс целиком. Если у файла GUID-имя, найди его по содержимому, а не
-   угадывай имя. Для search_docs задавай glob выбранного каталога, например
+2. Осмотри выбранный каталог через list_dir. Для T-FLEX DOCs прочитай из index.md
+   только оглавление — первые 106 строк (`read_file(path, line_limit=106)`);
+   последующие строки содержат пространства имён, их не читай как текст, а ищи
+   точечно через search_docs. Индексы других продуктов могут иметь другую структуру:
+   сначала вызови file_info и не читай большие index.md/search.md целиком. Для поиска
+   нужных страниц предпочитай search_docs по содержимому. Для остальных файлов
+   вызывай file_info/read_file только для точного
+   пути, ранее возвращённого list_dir или search_docs. Не угадывай имя файла по теме,
+   особенно для файлов с GUID-именами. Пути инструментов и glob указывай относительно
+   корня документации, без начального «/». Для search_docs задай glob выбранного
+   каталога, например
    "**/TFlexDOCs API/**/*.md" или "**/TFlexCAD API/**/*.md", чтобы не смешивать результаты.
 3. Начни с терминов задачи; затем ищи точные имена типов/членов, синонимы и связанные
-   типы из найденных примеров. Для точных имён и сигнатур используй literal=true при
-   необходимости. Сужай запросы и glob, вместо того чтобы полагаться на первые
-   совпадения общего поиска.
+   типы из найденных примеров. Избегай широких коротких запросов (например, только
+   "rtf"): они находят нерелевантные страницы. Для RTF-параметров T-FLEX DOCs ищи
+   точные термины `RtfHtmlManager`, `IsRtfString` и `RichEditDocumentServer`,
+   затем читай найденный пример обработки параметров. Для точных имён и сигнатур
+   используй literal=true при необходимости. Если выдача поиска неполная, продолжай
+   с указанного offset или сужай запросы и glob; не делай вывод по первым совпадениям
+   общего поиска.
 4. Каждое утверждение о реальном API подтверждай чтением документации выбранного
-   продукта через read_file. Проверяй класс/тип, пространство имён, точное имя члена,
+   продукта через read_file. Если search_docs вернул номер строки, читай фрагмент
+   вокруг этого места (например, задай start_line немного раньше найденной строки),
+   а не только начало файла. Проверяй класс/тип, пространство имён, точное имя члена,
    параметры, возвращаемый тип и нужную перегрузку. Ищи также требования к состоянию
    объекта, правам на редактирование, сохранению/отмене и порядку вызовов, когда они
    относятся к сценарию. Примеры помогают понять сценарий, но не заменяют проверку
@@ -118,8 +132,13 @@ T-FLEX CAD (геометрия и CAD-документы) или T-FLEX DOCs (м
    пока соответствующий API не найден в выбранном корпусе. Если подтверждения нет,
    явно оставь элемент неподтверждённым, а не угадывай.
 6. Перед чтением найденного файла вызывай file_info; большие файлы читай частями через
-   start_line/line_limit. Состав каталогов смотри через list_dir, поиск по содержимому —
-   через search_docs. Выбирай самый простой сценарий, который полностью решает задачу.
+   start_line/line_limit. Если инструмент сообщает, что путь не найден, не повторяй
+   тот же путь и не подбирай имя наугад: вернись к list_dir/search_docs. Если найти
+   файл не удалось, укажи это в ПРОБЕЛАХ. Выбирай самый простой сценарий, который
+   полностью решает задачу.
+7. Не повторяй уже выполненный поиск или чтение того же фрагмента. Если нужный пример
+   найден и прочитан, зафиксируй факты и заверши исследование; не переходи к случайным
+   типам с общими совпадениями и не продолжай поиск ради полноты всей подсистемы.
 
 В конце хода ОБЯЗАТЕЛЬНО выдай черновик ровно в таком формате:
 ФАКТЫ: (маркированный список подтверждённых фактов, каждый со ссылкой файл:строка)
@@ -234,41 +253,97 @@ async def probe_model() -> bool:
 # -------------------------------------------------------------------
 
 
-def register_tools(agent: Agent, budget: ToolOutputBudget) -> None:
+def register_tools(
+    agent: Agent, budget: ToolOutputBudget, rank_query: str = ""
+) -> None:
+    def duplicate_call() -> str:
+        return "Этот поиск/фрагмент уже обработан. Используй предыдущий результат."
+
+    def tool_limit_reached() -> str:
+        return (
+            "Достигнут лимит вызовов инструментов для этого запроса. "
+            "Останови поиск и подготовь ответ по уже собранным фактам."
+        )
+
+    def path_error(error: ModelRetry) -> str:
+        return (
+            f"{error} Не повторяй этот путь. Сначала проверь реальные имена через "
+            "list_dir или найди файл через search_docs."
+        )
+
     @agent.tool_plain
     async def search_docs(
         pattern: str,
         glob: str = "",
         literal: bool = False,
         case_sensitive: bool = False,
+        offset: int = 0,
     ) -> str:
         """Полнотекстовый поиск ripgrep по всей документации.
 
         pattern: regex или текст (при literal=true). Ищет по содержимому файлов.
         glob: необязательный фильтр имён файлов, например "*.md".
+        Результаты ранжируются по исходному вопросу пользователя.
+        offset: номер совпадения, с которого начать выдачу; используй значение
+        из подсказки, если результаты поиска усечены.
         Возвращает совпадения в формате путь:строка:текст.
         """
         if not pattern.strip():
             raise ValueError("pattern не может быть пустым")
-        results = await ripgrep_search(
+        if offset < 0:
+            raise ValueError("offset не может быть отрицательным")
+        key = (
+            "search",
+            pattern.strip(),
+            glob.strip(),
+            literal,
+            case_sensitive,
+            offset,
+        )
+        if budget.is_duplicate_call(key):
+            return duplicate_call()
+        if not budget.allow_tool_call():
+            return tool_limit_reached()
+        results, has_more = await ripgrep_search(
             pattern.strip(),
             glob=glob.strip() or None,
             literal=literal,
             case_sensitive=case_sensitive,
+            rank_query=rank_query,
+            offset=offset,
         )
         if not results:
             return budget.limit(
-                "Совпадений не найдено. Попробуй другие ключевые слова, "
+                "Больше совпадений нет с указанного offset. Попробуй другие "
+                "ключевые слова, literal=true или более узкий glob."
+                if offset
+                else "Совпадений не найдено. Попробуй другие ключевые слова, "
                 "literal=true или поиск без glob."
             )
         lines = [f"{path}:{n}: {text}" for path, n, text in results]
-        header = f"Найдено {len(lines)} совпадений (показано до {SHOW_LIMIT}):"
+        end_offset = offset + len(lines)
+        header = (
+            f"Совпадения по релевантности {offset + 1}–{end_offset}:"
+            if rank_query.strip()
+            else f"Совпадения {offset + 1}–{end_offset}:"
+        )
+        if has_more:
+            header += (
+                f" выдача неполная; продолжи тем же запросом с offset={end_offset}."
+            )
         return budget.limit(header + "\n" + "\n".join(lines))
 
     @agent.tool_plain
     async def list_dir(path: str) -> str:
         """Листинг каталога документации. Корень — «» или «.»."""
-        p = safe_resolve(path)
+        try:
+            p = safe_resolve(path)
+        except ModelRetry as exc:
+            return path_error(exc)
+        if budget.is_duplicate_call(("list_dir", p)):
+            return duplicate_call()
+        if not budget.allow_tool_call():
+            return tool_limit_reached()
         if not p.is_dir():
             raise ValueError(f"{rel_display(p)} — не каталог")
         entries = sorted(p.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower()))
@@ -294,7 +369,14 @@ def register_tools(agent: Agent, budget: ToolOutputBudget) -> None:
     async def file_info(path: str) -> str:
         """Оценка объёма файла: байты, строки, примерные токены и доля от
         контекстного окна. Вызывай ПЕРЕД чтением больших файлов."""
-        p = safe_resolve(path)
+        try:
+            p = safe_resolve(path)
+        except ModelRetry as exc:
+            return path_error(exc)
+        if budget.is_duplicate_call(("file_info", p)):
+            return duplicate_call()
+        if not budget.allow_tool_call():
+            return tool_limit_reached()
         if not p.is_file():
             raise ValueError(f"{rel_display(p)} — не файл")
         size = p.stat().st_size
@@ -325,7 +407,14 @@ def register_tools(agent: Agent, budget: ToolOutputBudget) -> None:
         (остаток читай через read_file(path, start_line=...)). line_limit>0 читает
         не более line_limit строк с позиции start_line.
         """
-        p = safe_resolve(path)
+        try:
+            p = safe_resolve(path)
+        except ModelRetry as exc:
+            return path_error(exc)
+        if budget.is_duplicate_call(("read_file", p, start_line, line_limit)):
+            return duplicate_call()
+        if not budget.allow_tool_call():
+            return tool_limit_reached()
         if not p.is_file():
             raise ValueError(f"{rel_display(p)} — не файл")
         token_budget = budget.read_token_limit
@@ -374,11 +463,18 @@ class TurnResult:
 
 
 async def _iter_agent_turn(
-    agent: Agent, prompt: str, history: list[ModelMessage] | None
+    agent: Agent,
+    prompt: str,
+    history: list[ModelMessage] | None,
+    usage_limits: UsageLimits,
 ) -> AsyncIterator[tuple[Literal["text", "tool"], str] | tuple[Literal["result"], TurnResult]]:
     """Один ход агента: события (text|tool|result); в конце ('messages', json)."""
     result = TurnResult()
-    async with agent.iter(user_prompt=prompt, message_history=history) as run:
+    async with agent.iter(
+        user_prompt=prompt,
+        message_history=history,
+        usage_limits=usage_limits,
+    ) as run:
         async for node in run:
             if Agent.is_model_request_node(node):
                 async for delta in _stream_text(node, run):
@@ -432,11 +528,15 @@ def _fit_context(
     prompt_truncated = False
     if input_tokens() > max_input_tokens:
         serialized = ModelMessagesTypeAdapter.dump_json(messages).decode("utf-8")
+        marker = "\n[Текст сокращён по лимиту контекста.]"
         available_chars = max(
             0,
-            max_input_tokens * 4 - len(serialized) - len(instructions) - 64,
+            int(max_input_tokens * CHARS_PER_TOKEN)
+            - len(serialized)
+            - len(instructions)
+            - 1,
         )
-        prompt = prompt[:available_chars] + "\n[Текст сокращён по лимиту контекста.]"
+        prompt = prompt[: max(0, available_chars - len(marker))] + marker[:available_chars]
         prompt_truncated = True
 
     return messages or None, prompt, dropped_history, prompt_truncated
@@ -464,9 +564,10 @@ async def run_pipeline(
     settings = current_model_settings()
     context_window_tokens = settings.context_window_tokens
     response_tokens = max(256, context_window_tokens // 5)
-    input_tokens = context_window_tokens - response_tokens - context_window_tokens // 20
-    research_input_tokens = input_tokens - context_window_tokens // 5
+    input_tokens = context_window_tokens - response_tokens - context_window_tokens // 10
+    research_input_tokens = input_tokens - context_window_tokens // 4
     tool_budget = ToolOutputBudget(context_window_tokens)
+    usage_limits = UsageLimits(request_limit=AGENT_REQUEST_LIMIT)
     model_settings: PydanticModelSettings = {"max_tokens": response_tokens}
     base_history: list[ModelMessage] = []
     if history_json:
@@ -478,7 +579,7 @@ async def run_pipeline(
         model_settings=model_settings,
         retries=2,
     )
-    register_tools(researcher, tool_budget)
+    register_tools(researcher, tool_budget, rank_query=user_text)
     critic = Agent(
         _build_model(RAW_CRITIC_MODEL and CRITIC_MODEL_NAME or settings.model, settings),
         instructions=CRITIC_INSTRUCTIONS,
@@ -492,7 +593,7 @@ async def run_pipeline(
         model_settings=model_settings,
         retries=2,
     )
-    register_tools(writer, tool_budget)
+    register_tools(writer, tool_budget, rank_query=user_text)
 
     prompt = user_text
     draft = ""
@@ -517,7 +618,9 @@ async def run_pipeline(
                 "message": "Текст запроса сокращён, чтобы вместить его в окно контекста модели.",
             }
         tool_events: list[str] = []
-        async for kind, payload in _iter_agent_turn(researcher, prompt, research_history):
+        async for kind, payload in _iter_agent_turn(
+            researcher, prompt, research_history, usage_limits
+        ):
             if kind == "text" and isinstance(payload, str):
                 yield {"type": "draft", "text": payload}
             elif kind == "tool" and isinstance(payload, str):
@@ -546,7 +649,7 @@ async def run_pipeline(
                 "type": "warning",
                 "message": "Материалы для проверки сокращены по лимиту контекста модели.",
             }
-        critique_res = await critic.run(critique_input)
+        critique_res = await critic.run(critique_input, usage_limits=usage_limits)
         critique: Critique = critique_res.output
         yield {
             "type": "critique",
@@ -594,7 +697,9 @@ async def run_pipeline(
     acc: list[str] = []
     writer_all: list[ModelMessage] = []
     async with writer.iter(
-        user_prompt=writer_prompt, message_history=research_history
+        user_prompt=writer_prompt,
+        message_history=research_history,
+        usage_limits=usage_limits,
     ) as wrun:
         async for node in wrun:
             if Agent.is_model_request_node(node):
