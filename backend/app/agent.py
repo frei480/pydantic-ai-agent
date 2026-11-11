@@ -14,7 +14,7 @@
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from httpx2 import Response
 from openai import AsyncOpenAI
@@ -118,7 +118,9 @@ T-FLEX CAD (геометрия и CAD-документы) или T-FLEX DOCs (м
    "rtf"): они находят нерелевантные страницы. Для RTF-параметров T-FLEX DOCs ищи
    точные термины `RtfHtmlManager`, `IsRtfString` и `RichEditDocumentServer`,
    затем читай найденный пример обработки параметров. Для точных имён и сигнатур
-   используй literal=true при необходимости. Если выдача поиска неполная, продолжай
+   используй literal=true при необходимости. При literal=true вся строка ищется
+   буквально: `|` не означает ИЛИ. Для альтернатив используй отдельные запросы
+   или regex с literal=false. Если выдача поиска неполная, продолжай
    с указанного offset или сужай запросы и glob; не делай вывод по первым совпадениям
    общего поиска.
 4. Каждое утверждение о реальном API подтверждай чтением документации выбранного
@@ -196,16 +198,33 @@ WRITER_INSTRUCTIONS = """Ты — инженер-технический писа
 источниками API. Инструменты используй лишь для быстрой проверки отдельной детали.
 Без длинных вступлений — сразу к делу. Отвечай на языке пользователя (по умолчанию русский)."""
 
+MAX_AGENT_RESPONSE_TOKENS = 4096
+MAX_CRITIC_RESPONSE_TOKENS = 1024
+
 
 class Critique(BaseModel):
     """Структурированный вердикт критика."""
 
     is_sufficient: bool = Field(description="Достаточно ли фактов для рабочего кода")
-    missing_info: list[str] = Field(default_factory=list, description="Конкретные пробелы")
-    search_queries: list[str] = Field(
-        default_factory=list, description="Предложенные поисковые запросы"
+    missing_info: list[Annotated[str, Field(max_length=240)]] = Field(
+        default_factory=list,
+        max_length=5,
+        description="Не более 5 существенных пробелов",
     )
-    comments: str = Field(default="", description="Краткий вердикт для пользователя")
+    search_queries: list[Annotated[str, Field(max_length=240)]] = Field(
+        default_factory=list,
+        max_length=3,
+        description="Не более 3 коротких поисковых запросов",
+    )
+    comments: str = Field(
+        default="",
+        max_length=500,
+        description="Краткий вердикт для пользователя",
+    )
+
+
+def _response_token_limit(context_window_tokens: int, phase_limit: int) -> int:
+    return max(256, min(phase_limit, context_window_tokens // 5))
 
 
 # -------------------------------------------------------------------
@@ -581,12 +600,20 @@ async def run_pipeline(
     """Агентский цикл. Генератор событий для SSE; последнее событие — «final»."""
     settings = current_model_settings()
     context_window_tokens = settings.context_window_tokens
-    response_tokens = max(256, context_window_tokens // 5)
+    response_tokens = _response_token_limit(
+        context_window_tokens, MAX_AGENT_RESPONSE_TOKENS
+    )
+    critic_response_tokens = _response_token_limit(
+        context_window_tokens, MAX_CRITIC_RESPONSE_TOKENS
+    )
     input_tokens = context_window_tokens - response_tokens - context_window_tokens // 10
     research_input_tokens = input_tokens - context_window_tokens // 4
     tool_budget = ToolOutputBudget(context_window_tokens)
     usage_limits = UsageLimits(request_limit=AGENT_REQUEST_LIMIT)
     model_settings: PydanticModelSettings = {"max_tokens": response_tokens}
+    critic_model_settings: PydanticModelSettings = {
+        "max_tokens": critic_response_tokens
+    }
     base_history: list[ModelMessage] = []
     if history_json:
         base_history = ModelMessagesTypeAdapter.validate_json(history_json)
@@ -601,7 +628,7 @@ async def run_pipeline(
     critic = Agent(
         _build_model(RAW_CRITIC_MODEL and CRITIC_MODEL_NAME or settings.model, settings),
         instructions=CRITIC_INSTRUCTIONS,
-        model_settings=model_settings,
+        model_settings=critic_model_settings,
         output_type=Critique,
         retries=2,
     )

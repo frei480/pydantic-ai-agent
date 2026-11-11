@@ -187,6 +187,18 @@ def check_context_prompt_trimming():
     assert estimate_tokens(prompt + "system instructions") <= limit
 
 
+def check_phase_response_token_limits():
+    assert agent._response_token_limit(128_000, agent.MAX_AGENT_RESPONSE_TOKENS) == 4096
+    assert agent._response_token_limit(128_000, agent.MAX_CRITIC_RESPONSE_TOKENS) == 1024
+    assert agent._response_token_limit(4_096, agent.MAX_AGENT_RESPONSE_TOKENS) == 819
+    schema = agent.Critique.model_json_schema()["properties"]
+    assert schema["missing_info"]["maxItems"] == 5
+    assert schema["missing_info"]["items"]["maxLength"] == 240
+    assert schema["search_queries"]["maxItems"] == 3
+    assert schema["search_queries"]["items"]["maxLength"] == 240
+    assert schema["comments"]["maxLength"] == 500
+
+
 async def check_existing_database_migration():
     with tempfile.TemporaryDirectory() as directory:
         db_path = os.path.join(directory, "legacy.db")
@@ -221,6 +233,7 @@ async def check_existing_database_migration():
 
 check_settings_validation()
 check_context_prompt_trimming()
+check_phase_response_token_limits()
 asyncio.run(check_model_settings_storage())
 asyncio.run(check_existing_database_migration())
 print("MODEL-SETTINGS-OK")
