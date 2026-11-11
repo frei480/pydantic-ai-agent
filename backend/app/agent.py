@@ -11,6 +11,7 @@
 Все фазы стримятся событиями для SSE.
 """
 
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Literal

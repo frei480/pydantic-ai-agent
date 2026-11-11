@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, "backend")
 
-from app import doc_tools  # noqa: E402
+from app import agent, doc_tools  # noqa: E402
 
 
 def check_search_pagination():
@@ -131,8 +131,12 @@ def check_relevant_heading_lookup():
             "## Работа со строковыми параметрами в формате rtf\n\nExample.\n",
             encoding="utf-8",
         )
-        line = doc_tools.find_relevant_heading_line(
-            source, "работа с параметрами содержащими текст в формате rtf"
+        line = asyncio.run(
+            agent.asyncio.to_thread(
+                doc_tools.find_relevant_heading_line,
+                source,
+                "работа с параметрами содержащими текст в формате rtf",
+            )
         )
 
     assert line == 5
