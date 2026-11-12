@@ -29,7 +29,9 @@ CREATE TABLE IF NOT EXISTS model_settings (
     model TEXT NOT NULL,
     api_key TEXT NOT NULL DEFAULT '',
     base_url TEXT,
-    context_window_tokens INTEGER NOT NULL DEFAULT 120000
+    context_window_tokens INTEGER NOT NULL DEFAULT 120000,
+    max_agent_response_tokens INTEGER NOT NULL DEFAULT 4096,
+    max_critic_response_tokens INTEGER NOT NULL DEFAULT 2048
 );
 """
 
@@ -52,6 +54,15 @@ class Database:
                 "ALTER TABLE model_settings ADD COLUMN context_window_tokens "
                 f"INTEGER NOT NULL DEFAULT {DEFAULT_CONTEXT_WINDOW_TOKENS}"
             )
+        for column, default in (
+            ("max_agent_response_tokens", 4096),
+            ("max_critic_response_tokens", 2048),
+        ):
+            if column not in columns:
+                await self._conn.execute(
+                    f"ALTER TABLE model_settings ADD COLUMN {column} "
+                    f"INTEGER NOT NULL DEFAULT {default}"
+                )
         await self._conn.commit()
 
     async def close(self) -> None:
@@ -161,7 +172,8 @@ class Database:
     async def get_model_settings(self) -> ModelSettings | None:
         cur = await self.conn.execute(
             """
-            SELECT provider, model, api_key, base_url, context_window_tokens
+            SELECT provider, model, api_key, base_url, context_window_tokens,
+                   max_agent_response_tokens, max_critic_response_tokens
             FROM model_settings WHERE id = 1
             """
         )
@@ -174,6 +186,8 @@ class Database:
             api_key=row["api_key"],
             base_url=row["base_url"],
             context_window_tokens=row["context_window_tokens"],
+            max_agent_response_tokens=row["max_agent_response_tokens"],
+            max_critic_response_tokens=row["max_critic_response_tokens"],
         )
 
     async def save_model_settings(
@@ -183,19 +197,32 @@ class Database:
         api_key: str,
         base_url: str | None,
         context_window_tokens: int,
+        max_agent_response_tokens: int = 4096,
+        max_critic_response_tokens: int = 2048,
     ) -> None:
         await self.conn.execute(
             """
             INSERT INTO model_settings
-                (id, provider, model, api_key, base_url, context_window_tokens)
-            VALUES (1, ?, ?, ?, ?, ?)
+                (id, provider, model, api_key, base_url, context_window_tokens,
+                 max_agent_response_tokens, max_critic_response_tokens)
+            VALUES (1, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 provider = excluded.provider,
                 model = excluded.model,
                 api_key = excluded.api_key,
                 base_url = excluded.base_url,
-                context_window_tokens = excluded.context_window_tokens
+                context_window_tokens = excluded.context_window_tokens,
+                max_agent_response_tokens = excluded.max_agent_response_tokens,
+                max_critic_response_tokens = excluded.max_critic_response_tokens
             """,
-            (provider, model, api_key, base_url, context_window_tokens),
+            (
+                provider,
+                model,
+                api_key,
+                base_url,
+                context_window_tokens,
+                max_agent_response_tokens,
+                max_critic_response_tokens,
+            ),
         )
         await self.conn.commit()

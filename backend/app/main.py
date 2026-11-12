@@ -30,6 +30,8 @@ class SettingsOut(TypedDict):
     base_url: str
     api_key_configured: bool
     context_window_tokens: int
+    max_agent_response_tokens: int
+    max_critic_response_tokens: int
 
 
 class ChatOut(TypedDict):
@@ -75,6 +77,8 @@ async def lifespan(app: FastAPI):
             defaults.api_key,
             defaults.base_url,
             defaults.context_window_tokens,
+            defaults.max_agent_response_tokens,
+            defaults.max_critic_response_tokens,
         )
     else:
         agent.configure_model(agent.ModelSettings(**settings))
@@ -106,6 +110,12 @@ class ModelSettingsIn(BaseModel):
     clear_api_key: bool = False
     context_window_tokens: int = Field(
         default=DEFAULT_CONTEXT_WINDOW_TOKENS, ge=4096, le=2_000_000
+    )
+    max_agent_response_tokens: int = Field(
+        default=agent.MAX_AGENT_RESPONSE_TOKENS, ge=256, le=32_768
+    )
+    max_critic_response_tokens: int = Field(
+        default=agent.MAX_CRITIC_RESPONSE_TOKENS, ge=256, le=16_384
     )
 
     @field_validator("model")
@@ -154,6 +164,8 @@ def _settings_out(settings: agent.ModelSettings) -> SettingsOut:
         "base_url": settings.base_url or "",
         "api_key_configured": bool(settings.api_key),
         "context_window_tokens": settings.context_window_tokens,
+        "max_agent_response_tokens": settings.max_agent_response_tokens,
+        "max_critic_response_tokens": settings.max_critic_response_tokens,
     }
 
 
@@ -222,6 +234,8 @@ async def update_settings(body: ModelSettingsIn) -> SettingsOut:
         api_key=api_key,
         base_url=body.base_url,
         context_window_tokens=body.context_window_tokens,
+        max_agent_response_tokens=body.max_agent_response_tokens,
+        max_critic_response_tokens=body.max_critic_response_tokens,
     )
     async with _model_health_lock:
         await dbase.save_model_settings(
@@ -230,6 +244,8 @@ async def update_settings(body: ModelSettingsIn) -> SettingsOut:
             settings.api_key,
             settings.base_url,
             settings.context_window_tokens,
+            settings.max_agent_response_tokens,
+            settings.max_critic_response_tokens,
         )
         agent.configure_model(settings)
         _model_health_cache = None

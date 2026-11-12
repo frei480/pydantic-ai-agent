@@ -69,6 +69,8 @@ type ModelSettings = {
   base_url: string;
   api_key_configured: boolean;
   context_window_tokens: number;
+  max_agent_response_tokens: number;
+  max_critic_response_tokens: number;
 };
 
 type SettingsForm = {
@@ -78,6 +80,8 @@ type SettingsForm = {
   api_key: string;
   clear_api_key: boolean;
   context_window_tokens: number;
+  max_agent_response_tokens: number;
+  max_critic_response_tokens: number;
 };
 
 const providerOptions: { value: Provider; label: string }[] = [
@@ -193,6 +197,8 @@ function App() {
     api_key: "",
     clear_api_key: false,
     context_window_tokens: 120000,
+    max_agent_response_tokens: 4096,
+    max_critic_response_tokens: 2048,
   });
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -309,6 +315,8 @@ function App() {
         ...current,
         api_key: "",
         clear_api_key: false,
+        max_agent_response_tokens: current.max_agent_response_tokens || 4096,
+        max_critic_response_tokens: current.max_critic_response_tokens || 2048,
       });
       setHasSavedApiKey(current.api_key_configured);
     } catch (loadError) {
@@ -335,6 +343,8 @@ function App() {
           api_key: settings.api_key || undefined,
           clear_api_key: settings.clear_api_key,
           context_window_tokens: settings.context_window_tokens,
+          max_agent_response_tokens: settings.max_agent_response_tokens,
+          max_critic_response_tokens: settings.max_critic_response_tokens,
         }),
       });
       setSettings({
@@ -941,6 +951,46 @@ function App() {
                     Это лимит всего запроса, а не только найденных документов. Агент резервирует около 20% для ответа,
                     ограничивает поиск и сокращает старую историю при необходимости. Оценка токенов приблизительная.
                   </span>
+                </label>
+
+                <label className="block">
+                  <span className="mb-1.5 block text-xs font-medium text-slate-700">Лимит ответа исследователя (токены)</span>
+                  <input
+                    type="number"
+                    required
+                    min={256}
+                    max={32_768}
+                    step={256}
+                    value={settings.max_agent_response_tokens}
+                    onChange={(event) =>
+                      setSettings((current) => ({
+                        ...current,
+                        max_agent_response_tokens: Number(event.target.value),
+                      }))
+                    }
+                    disabled={settingsSaving}
+                    className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-xs text-slate-800 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50"
+                  />
+                </label>
+
+                <label className="block">
+                  <span className="mb-1.5 block text-xs font-medium text-slate-700">Лимит ответа критика (токены)</span>
+                  <input
+                    type="number"
+                    required
+                    min={256}
+                    max={16_384}
+                    step={256}
+                    value={settings.max_critic_response_tokens}
+                    onChange={(event) =>
+                      setSettings((current) => ({
+                        ...current,
+                        max_critic_response_tokens: Number(event.target.value),
+                      }))
+                    }
+                    disabled={settingsSaving}
+                    className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-xs text-slate-800 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50"
+                  />
                 </label>
 
                 <label className="block">

@@ -25,3 +25,5 @@ class ModelSettings(TypedDict):
     api_key: str
     base_url: str | None
     context_window_tokens: int
+    max_agent_response_tokens: int
+    max_critic_response_tokens: int

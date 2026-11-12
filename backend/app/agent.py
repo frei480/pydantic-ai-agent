@@ -37,6 +37,8 @@ from .config import (
     CRITIC_MODEL_NAME,
     DEFAULT_CONTEXT_WINDOW_TOKENS,
     AGENT_REQUEST_LIMIT,
+    MAX_AGENT_RESPONSE_TOKENS,
+    MAX_CRITIC_RESPONSE_TOKENS,
     MAX_CRITIC_ROUNDS,
     MODEL_NAME,
     OPENAI_API_KEY,
@@ -62,6 +64,8 @@ class ModelSettings:
     api_key: str
     base_url: str | None
     context_window_tokens: int = DEFAULT_CONTEXT_WINDOW_TOKENS
+    max_agent_response_tokens: int = MAX_AGENT_RESPONSE_TOKENS
+    max_critic_response_tokens: int = MAX_CRITIC_RESPONSE_TOKENS
 
 
 _model_settings = ModelSettings(
@@ -70,6 +74,8 @@ _model_settings = ModelSettings(
     api_key=OPENAI_API_KEY,
     base_url=OPENAI_BASE_URL,
     context_window_tokens=DEFAULT_CONTEXT_WINDOW_TOKENS,
+    max_agent_response_tokens=MAX_AGENT_RESPONSE_TOKENS,
+    max_critic_response_tokens=MAX_CRITIC_RESPONSE_TOKENS,
 )
 
 
@@ -198,8 +204,6 @@ WRITER_INSTRUCTIONS = """Ты — инженер-технический писа
 источниками API. Инструменты используй лишь для быстрой проверки отдельной детали.
 Без длинных вступлений — сразу к делу. Отвечай на языке пользователя (по умолчанию русский)."""
 
-MAX_AGENT_RESPONSE_TOKENS = 4096
-MAX_CRITIC_RESPONSE_TOKENS = 1024
 
 
 class Critique(BaseModel):
@@ -601,10 +605,10 @@ async def run_pipeline(
     settings = current_model_settings()
     context_window_tokens = settings.context_window_tokens
     response_tokens = _response_token_limit(
-        context_window_tokens, MAX_AGENT_RESPONSE_TOKENS
+        context_window_tokens, settings.max_agent_response_tokens
     )
     critic_response_tokens = _response_token_limit(
-        context_window_tokens, MAX_CRITIC_RESPONSE_TOKENS
+        context_window_tokens, settings.max_critic_response_tokens
     )
     input_tokens = context_window_tokens - response_tokens - context_window_tokens // 10
     research_input_tokens = input_tokens - context_window_tokens // 4

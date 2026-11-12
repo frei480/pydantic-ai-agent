@@ -38,6 +38,8 @@ async def check_model_settings_storage():
                         "base_url": "https://openrouter.ai/api/v1",
                         "api_key": "sk-private-test-key",
                         "context_window_tokens": 8192,
+                        "max_agent_response_tokens": 5000,
+                        "max_critic_response_tokens": 1500,
                     },
                 )
                 assert response.status_code == 200, response.text
@@ -48,6 +50,8 @@ async def check_model_settings_storage():
                     "base_url": "https://openrouter.ai/api/v1",
                     "api_key_configured": True,
                     "context_window_tokens": 8192,
+                    "max_agent_response_tokens": 5000,
+                    "max_critic_response_tokens": 1500,
                 }
                 assert "sk-private-test-key" not in response.text
 
@@ -60,6 +64,8 @@ async def check_model_settings_storage():
                 assert stored is not None
                 assert stored["api_key"] == "sk-private-test-key"
                 assert stored["context_window_tokens"] == 8192
+                assert stored["max_agent_response_tokens"] == 5000
+                assert stored["max_critic_response_tokens"] == 1500
 
                 response = await client.put(
                     "/api/settings",
@@ -68,6 +74,8 @@ async def check_model_settings_storage():
                         "model": "qwen2.5:7b",
                         "base_url": "http://host.docker.internal:11434/v1",
                         "context_window_tokens": 16384,
+                        "max_agent_response_tokens": 6000,
+                        "max_critic_response_tokens": 1800,
                     },
                 )
                 assert response.status_code == 200, response.text
@@ -78,6 +86,8 @@ async def check_model_settings_storage():
                 assert agent.current_model_settings().provider == "ollama"
                 assert agent.current_model_settings().context_window_tokens == 16384
                 assert agent.current_model_settings().api_key == "sk-private-test-key"
+                assert agent.current_model_settings().max_agent_response_tokens == 6000
+                assert agent.current_model_settings().max_critic_response_tokens == 1800
                 assert (
                     agent.current_model_settings().base_url
                     == "http://host.docker.internal:11434/v1"
@@ -91,6 +101,8 @@ async def check_model_settings_storage():
                         "base_url": "http://host.docker.internal:11434/v1",
                         "clear_api_key": True,
                         "context_window_tokens": 16384,
+                        "max_agent_response_tokens": 7000,
+                        "max_critic_response_tokens": 2100,
                     },
                 )
                 assert response.status_code == 200, response.text
@@ -98,6 +110,8 @@ async def check_model_settings_storage():
                 assert stored is not None
                 assert stored["api_key"] == ""
                 assert stored["context_window_tokens"] == 16384
+                assert stored["max_agent_response_tokens"] == 7000
+                assert stored["max_critic_response_tokens"] == 2100
                 assert response.json()["api_key_configured"] is False
 
                 response = await client.put(
@@ -189,7 +203,7 @@ def check_context_prompt_trimming():
 
 def check_phase_response_token_limits():
     assert agent._response_token_limit(128_000, agent.MAX_AGENT_RESPONSE_TOKENS) == 4096
-    assert agent._response_token_limit(128_000, agent.MAX_CRITIC_RESPONSE_TOKENS) == 1024
+    assert agent._response_token_limit(128_000, agent.MAX_CRITIC_RESPONSE_TOKENS) == 2048
     assert agent._response_token_limit(4_096, agent.MAX_AGENT_RESPONSE_TOKENS) == 819
     schema = agent.Critique.model_json_schema()["properties"]
     assert schema["missing_info"]["maxItems"] == 5
