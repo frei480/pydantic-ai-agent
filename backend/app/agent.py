@@ -38,6 +38,7 @@ from .config import (
     CHARS_PER_TOKEN,
     CRITIC_MODEL_NAME,
     DEFAULT_CONTEXT_WINDOW_TOKENS,
+    DOCS_ROOT,
     AGENT_REQUEST_LIMIT,
     MAX_AGENT_RESPONSE_TOKENS,
     MAX_CRITIC_RESPONSE_TOKENS,
@@ -48,6 +49,7 @@ from .config import (
     OPENAI_MAX_RETRIES,
     RAW_CRITIC_MODEL,
 )
+from .doc_catalog import SUPPORTED_PRODUCTS, search_doc_topics as search_index_topics
 from .doc_tools import (
     ToolOutputBudget,
     count_lines,
@@ -110,10 +112,13 @@ T-FLEX CAD (геометрия и CAD-документы) или T-FLEX DOCs (м
    нужна. Для T-FLEX DOCs это может быть контекст макроса, справочник/объект, параметры,
    связи, жизненный цикл объекта, ServerConnection, UI, стадии/подписи, отчёты или
    процессы. Это подсказки для выбора направления поиска, а не подтверждение API.
+   Если нужный раздел или конкретные страницы не очевидны, вызови search_doc_topics
+   с коротким описанием задачи и продуктом (TFlexDOCs API или TFlexCAD API), чтобы
+   найти подходящие страницы в иерархии index.md до полнотекстового поиска.
 2. Осмотри выбранный каталог через list_dir. Для T-FLEX DOCs прочитай из index.md
-   только оглавление — первые 106 строк (`read_file(path, line_limit=106)`);
-   последующие строки содержат пространства имён, их не читай как текст, а ищи
-   точечно через search_docs. Индексы других продуктов могут иметь другую структуру:
+   только оглавление — первые 106 строк через `read_file(path, line_limit=106)`; для
+   навигации по пространствам имён и типам используй search_doc_topics, который
+   проходит ссылки в таблицах каталога. Индексы других продуктов могут иметь другую структуру:
    сначала вызови file_info и не читай большие index.md/search.md целиком. Для поиска
    нужных страниц предпочитай search_docs по содержимому. Для остальных файлов
    вызывай file_info/read_file только для точного
@@ -304,6 +309,49 @@ def register_tools(
         return (
             f"{error} Не повторяй этот путь. Сначала проверь реальные имена через "
             "list_dir или найди файл через search_docs."
+        )
+
+    @agent.tool_plain
+    async def search_doc_topics(
+        query: str, product: str = "TFlexDOCs API", limit: int = 10
+    ) -> str:
+        """Поиск страниц и доменов по иерархии index.md продукта.
+
+        Используй, если неясно, какие разделы документации подходят к задаче.
+        product: TFlexDOCs API или TFlexCAD API.
+        query: короткое описание сценария или предметной области.
+        limit: максимум релевантных ссылок (1–20).
+        Возвращает полный путь до linked Markdown-страницы и её путь в оглавлении.
+        """
+        if not query.strip():
+            raise ValueError("query не может быть пустым")
+        if product not in SUPPORTED_PRODUCTS:
+            raise ValueError(
+                f"product должен быть одним из: {', '.join(SUPPORTED_PRODUCTS)}"
+            )
+        if not 1 <= limit <= 20:
+            raise ValueError("limit должен быть от 1 до 20")
+        key = ("doc_topics", query.strip(), product, limit)
+        if budget.is_duplicate_call(key):
+            return duplicate_call()
+        if not budget.allow_tool_call():
+            return tool_limit_reached()
+        topics, total = await asyncio.to_thread(
+            search_index_topics, query, product, DOCS_ROOT, limit
+        )
+        if not topics:
+            return budget.limit_metadata(
+                f"В оглавлении {product} ({total} страниц) совпадений по теме нет. "
+                "Попробуй синонимы или search_docs по содержимому."
+            )
+        lines = [
+            f"- {topic.breadcrumb} — {product}/{topic.path}"
+            for topic in topics
+        ]
+        return budget.limit_metadata(
+            f"В оглавлении {product} найдено ссылок: {total}. "
+            f"Релевантные страницы ({len(topics)}):\n" + "\n".join(lines),
+            reserve_tokens=budget.read_token_limit + 512,
         )
 
     @agent.tool_plain
