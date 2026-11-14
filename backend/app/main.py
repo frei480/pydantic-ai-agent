@@ -18,7 +18,7 @@ from .config import (
     DEFAULT_CONTEXT_WINDOW_TOKENS,
     DOCS_ROOT,
 )
-from .doc_catalog import preload_doc_catalogs
+from .doc_catalog import preload_doc_catalogs, search_indexed_pages
 
 dbase = db.Database(str(DB_PATH))
 logger = logging.getLogger(__name__)
@@ -103,6 +103,41 @@ class ChatIn(BaseModel):
 
 class MessageIn(BaseModel):
     content: str
+
+
+class IndexedPageSearchIn(BaseModel):
+    query: str = Field(min_length=1, max_length=500)
+    product: Literal["TFlexCAD API", "TFlexDOCs API"] = "TFlexDOCs API"
+    limit: int = Field(default=10, ge=1, le=20)
+
+    @field_validator("query")
+    @classmethod
+    def trim_query(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Укажите поисковый запрос")
+        return value
+
+
+class IndexedPageSearchResultOut(BaseModel):
+    title: str
+    path: str
+    breadcrumb: str
+    section: str
+    keywords: list[str]
+    intro: str
+    excerpt: str
+    excerpt_start_line: int
+    excerpt_end_line: int
+
+
+class IndexedPageSearchOut(BaseModel):
+    query: str
+    product: str
+    indexed_pages: int
+    result_count: int
+    elapsed_ms: float
+    results: list[IndexedPageSearchResultOut]
 
 
 class ModelSettingsIn(BaseModel):
@@ -209,6 +244,45 @@ async def health() -> HealthOut:
         "docs_root": DOCS_ROOT.name + "/",
         "context_token_limit": settings.context_window_tokens,
     }
+
+
+@app.post(
+    "/api/tools/search-indexed-pages",
+    response_model=IndexedPageSearchOut,
+)
+async def search_indexed_pages_endpoint(
+    body: IndexedPageSearchIn,
+) -> IndexedPageSearchOut:
+    """Run the same indexed-page search used by the agent, without an LLM call."""
+    started_at = time.perf_counter()
+    results, indexed_pages = await asyncio.to_thread(
+        search_indexed_pages,
+        body.query,
+        body.product,
+        DOCS_ROOT,
+        body.limit,
+    )
+    return IndexedPageSearchOut(
+        query=body.query,
+        product=body.product,
+        indexed_pages=indexed_pages,
+        result_count=len(results),
+        elapsed_ms=round((time.perf_counter() - started_at) * 1000, 2),
+        results=[
+            IndexedPageSearchResultOut(
+                title=result.page.title,
+                path=result.page.path,
+                breadcrumb=result.page.breadcrumb,
+                section=result.section,
+                keywords=list(result.page.keywords),
+                intro=result.page.intro,
+                excerpt=result.excerpt,
+                excerpt_start_line=result.excerpt_start_line,
+                excerpt_end_line=result.excerpt_end_line,
+            )
+            for result in results
+        ],
+    )
 
 
 @app.get("/api/settings")
