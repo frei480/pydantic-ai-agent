@@ -7,7 +7,12 @@ import sys
 
 sys.path.insert(0, "backend")
 
-from app.doc_catalog import search_doc_intros, search_doc_topics
+from app.doc_catalog import (
+    load_doc_catalog,
+    preload_doc_catalogs,
+    search_doc_topics,
+    search_indexed_pages,
+)
 
 
 def check_nested_index_search():
@@ -55,7 +60,7 @@ def check_validation():
             ("API", "unknown", root, 10),
             ("API", "TFlexDOCs API", root, 0),
         )
-        for search in (search_doc_topics, search_doc_intros):
+        for search in (search_doc_topics, search_indexed_pages):
             for args in invalid_queries:
                 try:
                     search(*args)
@@ -101,7 +106,7 @@ def check_namespace_tables():
     )
 
 
-def check_intro_search_finds_examples_by_content():
+def check_full_page_search_builds_metadata_and_finds_examples():
     with tempfile.TemporaryDirectory() as directory:
         docs_root = Path(directory)
         product_root = docs_root / "TFlexDOCs API"
@@ -124,21 +129,44 @@ def check_intro_search_finds_examples_by_content():
             "# Отчёты\n\nСоздание и настройка отчётов.\n",
             encoding="utf-8",
         )
+        cad_root = docs_root / "TFlexCAD API"
+        cad_root.mkdir()
+        (cad_root / "index.md").write_text(
+            "* [Документы](document.md)\n",
+            encoding="utf-8",
+        )
+        (cad_root / "document.md").write_text(
+            "# Документы\n\nОткрытие и сохранение CAD-документов.\n",
+            encoding="utf-8",
+        )
 
-        topics, total = search_doc_intros(
+        catalog = load_doc_catalog("TFlexDOCs API", docs_root)
+        catalog_counts = preload_doc_catalogs(docs_root)
+        results, total = search_indexed_pages(
             "ServerConnection пример подключения из макроса",
             "TFlexDOCs API",
             docs_root,
         )
+        code_results, _ = search_indexed_pages(
+            "ignored sample", "TFlexDOCs API", docs_root
+        )
 
+    page = catalog["api.md"]
     assert total == 2
-    assert topics[0].path == "api.md"
-    assert "ServerConnection" in topics[0].description
-    assert "ignored" not in topics[0].description
+    assert catalog_counts == {"TFlexCAD API": 1, "TFlexDOCs API": 2}
+    assert results[0].page.path == "api.md"
+    assert "ServerConnection" in page.keywords
+    assert page.headings[0].title == "Соединение с сервером"
+    assert "ServerConnection" in page.content
+    assert "ignored" not in page.intro
+    assert "ServerConnection" in results[0].excerpt
+    assert results[0].section == "Соединение с сервером"
+    assert code_results[0].page.path == "api.md"
+    assert "ignored" in code_results[0].excerpt
 
 
 check_nested_index_search()
 check_validation()
 check_namespace_tables()
-check_intro_search_finds_examples_by_content()
+check_full_page_search_builds_metadata_and_finds_examples()
 print("DOC-CATALOG-OK")

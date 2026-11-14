@@ -52,7 +52,7 @@ from .config import (
 )
 from .doc_catalog import (
     SUPPORTED_PRODUCTS,
-    search_doc_intros as search_index_intros,
+    search_indexed_pages as search_indexed_doc_pages,
     search_doc_topics as search_index_topics,
 )
 from .doc_tools import (
@@ -121,10 +121,10 @@ T-FLEX CAD (геометрия и CAD-документы) или T-FLEX DOCs (м
    с коротким описанием задачи и продуктом (TFlexDOCs API или TFlexCAD API), чтобы
    найти подходящие страницы в иерархии index.md до полнотекстового поиска.
    Если названия страниц не отражают сценарий или search_doc_topics находит только
-   страницу типа/члена API без подходящего примера, вызови search_doc_intros с тем же
-   запросом: он ищет по первому абзацу всех страниц, прямо перечисленных в index.md,
-   и возвращает релевантные выдержки с путями. Используй их для навигации и переходи
-   к полному чтению страницы с найденным примером.
+   страницу типа/члена API без подходящего примера, вызови search_indexed_pages с тем
+   же запросом: он ищет по полному тексту страниц index.md, ключевым словам и заголовкам,
+   возвращая релевантные выдержки с номерами строк. Используй их для навигации и
+   переходи к полному чтению страницы с найденным примером.
 2. Осмотри выбранный каталог через list_dir. Для T-FLEX DOCs прочитай из index.md
    только оглавление — первые 106 строк через `read_file(path, line_limit=106)`; для
    навигации по пространствам имён и типам используй search_doc_topics, который
@@ -428,13 +428,13 @@ def register_tools(
         )
 
     @agent.tool_plain
-    async def search_doc_intros(
+    async def search_indexed_pages(
         query: str, product: str = "TFlexDOCs API", limit: int = 10
     ) -> str:
-        """Поиск по вводным абзацам страниц, на которые прямо ссылается index.md.
+        """Поиск по полным текстам страниц, перечисленных в index.md.
 
-        Используй, если название страницы или topic search не раскрывают её пример
-        или назначение. Возвращает первые абзацы наиболее релевантных страниц.
+        Используй, если название страницы или topic search не раскрывают нужный пример.
+        Ищет по содержимому, заголовкам и ключевым словам; возвращает выдержки с номерами строк.
         product: TFlexDOCs API или TFlexCAD API.
         query: короткое описание сценария или предметной области.
         limit: максимум страниц с выдержками (1–20).
@@ -447,28 +447,32 @@ def register_tools(
             )
         if not 1 <= limit <= 20:
             raise ValueError("limit должен быть от 1 до 20")
-        key = ("doc_intros", query.strip(), product, limit)
+        key = ("indexed_pages", query.strip(), product, limit)
         if budget.is_duplicate_call(key):
             return duplicate_call()
         if not budget.allow_tool_call():
             return tool_limit_reached()
-        topics, total = await asyncio.to_thread(
-            search_index_intros, query, product, DOCS_ROOT, limit
+        results, total = await asyncio.to_thread(
+            search_indexed_doc_pages, query, product, DOCS_ROOT, limit
         )
-        if not topics:
+        if not results:
             return budget.limit_metadata(
-                f"Вводные абзацы страниц из index.md продукта {product} "
-                f"({total} страниц с текстом) не содержат совпадений. "
+                f"Полные тексты страниц index.md продукта {product} "
+                f"({total} страниц) не содержат совпадений. "
                 "Попробуй синонимы или search_docs по содержимому."
             )
         lines = [
-            f"- {topic.breadcrumb} — {product}/{topic.path}\n"
-            f"  Вводный абзац: {topic.description}"
-            for topic in topics
+            f"- {result.page.breadcrumb} — {product}/{result.page.path}\n"
+            f"  Ключевые слова: {', '.join(result.page.keywords[:12])}\n"
+            f"  Раздел: {result.section or 'вводная часть'}\n"
+            f"  Вводный абзац: {result.page.intro}\n"
+            f"  Совпадение, строки {result.excerpt_start_line}-"
+            f"{result.excerpt_end_line}:\n{result.excerpt}"
+            for result in results
         ]
         return budget.limit_metadata(
-            f"В index.md найдено страниц с вводным текстом: {total}. "
-            f"Релевантные страницы ({len(topics)}):\n" + "\n".join(lines),
+            f"В кэше index.md страниц: {total}. "
+            f"Релевантные страницы ({len(results)}):\n" + "\n".join(lines),
             reserve_tokens=budget.read_token_limit + 512,
         )
 

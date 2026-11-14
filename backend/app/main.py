@@ -18,6 +18,7 @@ from .config import (
     DEFAULT_CONTEXT_WINDOW_TOKENS,
     DOCS_ROOT,
 )
+from .doc_catalog import preload_doc_catalogs
 
 dbase = db.Database(str(DB_PATH))
 logger = logging.getLogger(__name__)
@@ -67,6 +68,8 @@ _model_health_lock = asyncio.Lock()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    catalog_counts = await asyncio.to_thread(preload_doc_catalogs, DOCS_ROOT)
+    logger.info("Preloaded documentation catalogs: %s", catalog_counts)
     await dbase.connect()
     settings = await dbase.get_model_settings()
     if settings is None:

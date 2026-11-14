@@ -24,7 +24,7 @@ For C# macro examples, follow the documented `MacroProvider` / `MacroContext` pa
 
 Start with `TFlexDOCs API/index.md`, read only its table-of-contents section, then search within `**/TFlexDOCs API/**/*.md`. Choose the narrowest applicable topic:
 
-If a topic's title does not reveal its relevant scenario or example, use `search_doc_intros` with the task description. It searches the introductory paragraph of each page linked directly from the index and returns relevant excerpts with paths. Treat these excerpts as navigation hints, then read the complete page before relying on its API details.
+If a topic's title does not reveal its relevant scenario or example, use `search_indexed_pages` with the task description. It searches the full text of every page linked directly from the index, including its extracted headings and keywords, and returns matching excerpts with paths and line numbers. Treat these excerpts as navigation hints, then read the complete page before relying on its API details.
 
 - **Parameters and formulas:** `Макроязык/Параметры`, `Работа с параметрами`, and the event pages for parameter changes. Verify parameter names, value types, linked-object access, and whether the macro is a parameter-change handler.
 - **Find or create objects:** `Макроязык/Поиск объектов`, `Макроязык`, and `Справочники`. Check whether a lookup returns one object, a collection, or `null`; validate results before use.
