@@ -156,10 +156,27 @@ def search_indexed_pages(
         )
         for path, page in catalog.items()
     ]
-    ranked = bm25_rank_documents(query, documents)
+    metadata_documents = [
+        (path, f"{page.title}\n{page.breadcrumb}\n{page.intro}")
+        for path, page in catalog.items()
+    ]
+    full_text_scores = {
+        path: score for score, path, _ in bm25_rank_documents(query, documents)
+    }
+    metadata_scores = {
+        path: score
+        for score, path, _ in bm25_rank_documents(query, metadata_documents)
+    }
+    ranked_paths = sorted(
+        catalog,
+        key=lambda path: (
+            -(full_text_scores[path] + metadata_scores[path]),
+            path.casefold(),
+        ),
+    )
     results: list[DocSearchResult] = []
-    for score, path, _ in ranked:
-        if score <= 0:
+    for path in ranked_paths:
+        if full_text_scores[path] + metadata_scores[path] <= 0:
             continue
         page = catalog[path]
         excerpt, start_line, end_line = _find_relevant_excerpt(page.content, query)

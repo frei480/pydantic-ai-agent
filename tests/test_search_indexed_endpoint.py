@@ -49,11 +49,8 @@ async def check_search_endpoint():
             assert response.status_code == 200, response.text
             payload = response.json()
             assert payload["result_count"] > 0
-            files_page = next(
-                result
-                for result in payload["results"]
-                if result["path"] == "0BBDFA21-580C-4D3B-A6E8-30C3E6186D78.md"
-            )
+            files_page = payload["results"][0]
+            assert files_page["path"] == "0BBDFA21-580C-4D3B-A6E8-30C3E6186D78.md"
             assert "Справочник" in files_page["excerpt"]
 
             for invalid in (
