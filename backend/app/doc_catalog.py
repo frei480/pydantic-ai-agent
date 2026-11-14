@@ -84,6 +84,106 @@ def search_doc_topics(
     return relevant, len(catalog)
 
 
+def search_doc_intros(
+    query: str,
+    product: str,
+    docs_root: Path,
+    limit: int = 10,
+) -> tuple[list[DocTopic], int]:
+    """Search the first prose paragraph of pages linked directly from index.md."""
+    if not query.strip():
+        raise ValueError("query не может быть пустым")
+    if product not in SUPPORTED_PRODUCTS:
+        raise ValueError(f"Неизвестный продукт документации: {product}")
+    if not 1 <= limit <= 20:
+        raise ValueError("limit должен быть от 1 до 20")
+
+    product_root = (docs_root / product).resolve()
+    index_path = product_root / "index.md"
+    if not index_path.is_file():
+        raise FileNotFoundError(f"Оглавление документации не найдено: {index_path}")
+
+    unique_entries: dict[str, DocTopic] = {}
+    for entry in _parse_list_index(index_path, product_root):
+        previous = unique_entries.get(entry.path)
+        if previous is None or len(entry.breadcrumb) > len(previous.breadcrumb):
+            unique_entries[entry.path] = entry
+
+    documents: list[tuple[str, str]] = []
+    by_path: dict[str, DocTopic] = {}
+    for entry in unique_entries.values():
+        page_path = (product_root / entry.path).resolve()
+        if not page_path.is_file() or not page_path.is_relative_to(product_root):
+            continue
+        introduction = _read_intro_paragraph(page_path)
+        if not introduction:
+            continue
+        topic = DocTopic(
+            entry.title,
+            entry.path,
+            entry.breadcrumb,
+            description=introduction,
+        )
+        by_path[entry.path] = topic
+        documents.append(
+            (
+                entry.path,
+                f"{entry.title}\n{entry.breadcrumb}\n{introduction}",
+            )
+        )
+
+    ranked = bm25_rank_documents(query, documents)
+    relevant = [
+        by_path[path] for score, path, _ in ranked if score > 0
+    ][:limit]
+    return relevant, len(documents)
+
+
+@lru_cache(maxsize=1024)
+def _read_intro_paragraph_cached(
+    page_path: Path,
+    modified_ns: int,
+    size: int,
+) -> str:
+    del modified_ns, size
+    paragraph: list[str] = []
+    character_count = 0
+    in_code_fence = False
+    with page_path.open("r", encoding="utf-8-sig", errors="replace") as page:
+        for line in page:
+            stripped = line.strip()
+            if stripped.startswith("```") or stripped.startswith("~~~"):
+                in_code_fence = not in_code_fence
+                continue
+            if in_code_fence:
+                continue
+            if not stripped:
+                if paragraph:
+                    break
+                continue
+            if not paragraph and (
+                stripped.startswith("#")
+                or set(stripped) <= {"-", "*", "_"}
+                or stripped.casefold().startswith("руководство по")
+                or stripped.startswith("|")
+            ):
+                continue
+            paragraph.append(stripped)
+            character_count += len(stripped)
+            if character_count >= 1200:
+                break
+
+    text = " ".join(paragraph)
+    text = _MARKDOWN_LINK.sub(r"\1", text)
+    text = re.sub(r"[`*_~]", "", text)
+    return text[:1200]
+
+
+def _read_intro_paragraph(page_path: Path) -> str:
+    stat = page_path.stat()
+    return _read_intro_paragraph_cached(page_path, stat.st_mtime_ns, stat.st_size)
+
+
 @lru_cache(maxsize=4)
 def _parse_list_index(
     index_path: Path,

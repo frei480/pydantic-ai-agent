@@ -7,7 +7,7 @@ import sys
 
 sys.path.insert(0, "backend")
 
-from app.doc_catalog import search_doc_topics
+from app.doc_catalog import search_doc_intros, search_doc_topics
 
 
 def check_nested_index_search():
@@ -50,16 +50,20 @@ def check_validation():
         product_root.mkdir()
         (product_root / "index.md").write_text("* [API](api.md)\n", encoding="utf-8")
 
-        for args in (
+        invalid_queries = (
             ("", "TFlexDOCs API", root, 10),
             ("API", "unknown", root, 10),
             ("API", "TFlexDOCs API", root, 0),
-        ):
-            try:
-                search_doc_topics(*args)
-            except ValueError:
-                continue
-            raise AssertionError(f"invalid catalog query was accepted: {args}")
+        )
+        for search in (search_doc_topics, search_doc_intros):
+            for args in invalid_queries:
+                try:
+                    search(*args)
+                except ValueError:
+                    continue
+                raise AssertionError(
+                    f"invalid catalog query was accepted by {search.__name__}: {args}"
+                )
 
 
 def check_namespace_tables():
@@ -97,7 +101,44 @@ def check_namespace_tables():
     )
 
 
+def check_intro_search_finds_examples_by_content():
+    with tempfile.TemporaryDirectory() as directory:
+        docs_root = Path(directory)
+        product_root = docs_root / "TFlexDOCs API"
+        product_root.mkdir()
+        (product_root / "index.md").write_text(
+            "* [API](api.md)\n"
+            "* [Другое руководство](other.md)\n",
+            encoding="utf-8",
+        )
+        (product_root / "api.md").write_text(
+            "Руководство по API\n\n"
+            "# Соединение с сервером\n\n"
+            "---\n\n"
+            "В макросах соединение ServerConnection можно получить из контекста. "
+            "[Пример подключения](api.htm#ServerConnectionFromMacro).\n\n"
+            "```cs\nignored ServerConnection sample\n```\n",
+            encoding="utf-8",
+        )
+        (product_root / "other.md").write_text(
+            "# Отчёты\n\nСоздание и настройка отчётов.\n",
+            encoding="utf-8",
+        )
+
+        topics, total = search_doc_intros(
+            "ServerConnection пример подключения из макроса",
+            "TFlexDOCs API",
+            docs_root,
+        )
+
+    assert total == 2
+    assert topics[0].path == "api.md"
+    assert "ServerConnection" in topics[0].description
+    assert "ignored" not in topics[0].description
+
+
 check_nested_index_search()
 check_validation()
 check_namespace_tables()
+check_intro_search_finds_examples_by_content()
 print("DOC-CATALOG-OK")
