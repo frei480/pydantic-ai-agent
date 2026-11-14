@@ -127,6 +127,11 @@ T-FLEX CAD (геометрия и CAD-документы) или T-FLEX DOCs (м
    корня документации, без начального «/». Для search_docs задай glob выбранного
    каталога, например
    "**/TFlexDOCs API/**/*.md" или "**/TFlexCAD API/**/*.md", чтобы не смешивать результаты.
+   Если нужно понять общую структуру T-FLEX DOCs Open API или связи между его типами,
+   найди через search_docs страницу "T-FLEX DOCs Open API — диаграмма объектов" и
+   прочитай её: Markdown-страница содержит ссылку на исходную SVG-диаграмму и текстовое
+   описание групп и связей. Используй её для навигации по API, но подтверждай детали
+   конкретных типов и членов в профильных страницах документации.
 3. Начни с терминов задачи; затем ищи точные имена типов/членов, синонимы и связанные
    типы из найденных примеров. Избегай широких коротких запросов (например, только
    "rtf"): они находят нерелевантные страницы. Для RTF-параметров T-FLEX DOCs ищи
@@ -171,13 +176,16 @@ T-FLEX CAD (геометрия и CAD-документы) или T-FLEX DOCs (м
 """
 
 DOMAIN_DELEGATION_INSTRUCTIONS = """Для предметного исследования используй делегирование:
-передай задачу агенту `tflex_docs_researcher` для T-FLEX DOCs или
-`tflex_cad_researcher` для T-FLEX CAD через `delegate_task`. Если вопрос охватывает
-оба продукта, делегируй каждому отдельную узкую подзадачу. Попроси вернуть только
-проверенные факты со ссылками `файл:строка`, точные сигнатуры и существенные пробелы.
-Не проси субагента писать финальный ответ или предполагать неподтверждённое. Используй
-его результат как источник для собственного исследования и проверки, а не как замену
-проверке документации.
+передай задачу агенту `tflex_docs_researcher` для T-FLEX DOCs. Для T-FLEX CAD выбери
+субагента по сценарию: `tflex_cad_document_researcher` для документа и общих операций
+(открытие, создание, поиск, изменение, сохранение, удаление), `tflex_cad_2d_researcher`
+для 2D-геометрии и оформления или `tflex_cad_3d_researcher` для 3D-узлов, профилей,
+рабочих плоскостей, путей и операций. Если сценарий действительно пересекает домены,
+раздели его на узкие подзадачи и делегируй отдельно. При вопросе о двух продуктах
+делегируй каждому отдельную подзадачу. Попроси вернуть только проверенные факты со
+ссылками `файл:строка`, точные сигнатуры и существенные пробелы. Не проси субагента
+писать финальный ответ или предполагать неподтверждённое. Используй его результат как
+источник для собственного исследования и проверки, а не как замену проверке документации.
 """
 
 DOCS_SPECIALIST_INSTRUCTIONS = """Ты — субагент-исследователь T-FLEX DOCs Open API.
@@ -196,6 +204,31 @@ CAD_SPECIALIST_INSTRUCTIONS = """Ты — субагент-исследоват�
 нужные страницы и читай их; возвращай факты с точными ссылками файл:строка,
 сигнатуры членов и существенные пробелы. Не пиши код решения и не делай выводов за
 пределами документации.
+"""
+
+CAD_DOCUMENT_SPECIALIST_INSTRUCTIONS = CAD_SPECIALIST_INSTRUCTIONS + """\
+Сосредоточься на объекте Document, жизненном цикле документа и типовых сценариях
+управления им: открытие, получение объектов, создание, изменение, удаление, сохранение
+и закрытие. Найди профильное руководство и соответствующий пример из каталога T-FLEX
+CAD, затем проверь точные члены API, если пример их не подтверждает или задача требует
+точную сигнатуру. Не предполагай, что документ уже открыт, что изменения сохранены или
+что вызов безопасен без проверки предусловий.
+"""
+
+CAD_2D_SPECIALIST_INSTRUCTIONS = CAD_SPECIALIST_INSTRUCTIONS + """\
+Сосредоточься на 2D-модели: узлах, линиях построения, линиях изображения, размерах,
+тексте, видах, фрагментах и оформлении. Для построения найди профильный пример нужного
+типа; проверь последовательность создания связанных объектов и документный блок
+изменений, когда сценарий меняет документ. Не подменяй один вид геометрии другим и не
+выводи сигнатуры конструкторов из названий типов.
+"""
+
+CAD_3D_SPECIALIST_INSTRUCTIONS = CAD_SPECIALIST_INSTRUCTIONS + """\
+Сосредоточься на 3D-модели: узлах, профилях, путях, рабочих поверхностях и плоскостях,
+операциях, фрагментах и преобразованиях. Отличай объекты дерева модели от
+геометрических данных, создаваемых при регенерации. Найди профильный пример для
+операции пользователя и проверь зависимости, входные типы и порядок построения по
+документации; не выводи их из диаграмм классов.
 """
 
 CRITIC_INSTRUCTIONS = """Ты — практичный технический критик результата исследования документации API.
@@ -236,8 +269,10 @@ WRITER_INSTRUCTIONS = """Ты — инженер-технический писа
 Если какой-то элемент кода не удалось подтвердить документацией — отметь это явно
 предупреждением рядом с кодом. Не смешивай API T-FLEX CAD и T-FLEX DOCs; при необходимости
 уточни, для какого продукта предназначен код. Для изменения объектов учитывай подтверждённые
-документацией правила редактирования и сохранения. Руководства по поиску не являются
-источниками API. Инструменты используй лишь для быстрой проверки отдельной детали.
+документацией правила редактирования и сохранения. При написании кода для T-FLEX CAD
+используй подходящий навык для документа, 2D или 3D; карту объектной модели используй
+только для навигации. Руководства по поиску не являются источниками API. Инструменты
+используй лишь для быстрой проверки отдельной детали.
 Без длинных вступлений — сразу к делу. Отвечай на языке пользователя (по умолчанию русский)."""
 
 
@@ -715,14 +750,48 @@ async def run_pipeline(
         retries=2,
     )
     register_tools(docs_specialist, tool_budget, rank_query=user_text)
-    cad_specialist = Agent(
+    cad_document_specialist = Agent(
         _build_model(settings.model, settings),
-        name="tflex_cad_researcher",
-        instructions=CAD_SPECIALIST_INSTRUCTIONS,
+        name="tflex_cad_document_researcher",
+        instructions=CAD_DOCUMENT_SPECIALIST_INSTRUCTIONS,
         model_settings=model_settings,
+        capabilities=[
+            Skills(
+                ".",
+                workspace=SkillWorkspaceBackend(Path(__file__).parent / "skills"),
+            )
+        ],
         retries=2,
     )
-    register_tools(cad_specialist, tool_budget, rank_query=user_text)
+    register_tools(cad_document_specialist, tool_budget, rank_query=user_text)
+    cad_2d_specialist = Agent(
+        _build_model(settings.model, settings),
+        name="tflex_cad_2d_researcher",
+        instructions=CAD_2D_SPECIALIST_INSTRUCTIONS,
+        model_settings=model_settings,
+        capabilities=[
+            Skills(
+                ".",
+                workspace=SkillWorkspaceBackend(Path(__file__).parent / "skills"),
+            )
+        ],
+        retries=2,
+    )
+    register_tools(cad_2d_specialist, tool_budget, rank_query=user_text)
+    cad_3d_specialist = Agent(
+        _build_model(settings.model, settings),
+        name="tflex_cad_3d_researcher",
+        instructions=CAD_3D_SPECIALIST_INSTRUCTIONS,
+        model_settings=model_settings,
+        capabilities=[
+            Skills(
+                ".",
+                workspace=SkillWorkspaceBackend(Path(__file__).parent / "skills"),
+            )
+        ],
+        retries=2,
+    )
+    register_tools(cad_3d_specialist, tool_budget, rank_query=user_text)
     specialist_delegation = SubAgents(
         agents=[
             SubAgent(
@@ -732,14 +801,36 @@ async def run_pipeline(
                 max_calls=1,
             ),
             SubAgent(
-                agent=cad_specialist,
-                description="Исследует T-FLEX CAD Open API, документы и геометрию.",
+                agent=cad_document_specialist,
+                description=(
+                    "Исследует T-FLEX CAD: открытие, получение объектов, создание, "
+                    "изменение, сохранение и закрытие документа."
+                ),
+                usage_limits=UsageLimits(request_limit=12),
+                max_calls=1,
+            ),
+            SubAgent(
+                agent=cad_2d_specialist,
+                description=(
+                    "Исследует T-FLEX CAD 2D API: узлы, построения, линии изображения, "
+                    "размеры, оформление и фрагменты."
+                ),
+                usage_limits=UsageLimits(request_limit=12),
+                max_calls=1,
+            ),
+            SubAgent(
+                agent=cad_3d_specialist,
+                description=(
+                    "Исследует T-FLEX CAD 3D API: узлы, профили, пути, рабочие "
+                    "поверхности, операции и преобразования."
+                ),
                 usage_limits=UsageLimits(request_limit=12),
                 max_calls=1,
             ),
         ],
         forward_usage=True,
-        max_depth=1,
+        max_depth=2,
+        event_stream_handler=stream_child_events,
     )
     researcher = Agent(
         _build_model(settings.model, settings),
@@ -766,6 +857,12 @@ async def run_pipeline(
         _build_model(settings.model, settings),
         instructions=WRITER_INSTRUCTIONS,
         model_settings=model_settings,
+        capabilities=[
+            Skills(
+                ".",
+                workspace=SkillWorkspaceBackend(Path(__file__).parent / "skills"),
+            )
+        ],
         retries=2,
     )
     register_tools(writer, tool_budget, rank_query=user_text)
