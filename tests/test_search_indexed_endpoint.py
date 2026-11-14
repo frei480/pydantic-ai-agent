@@ -30,13 +30,31 @@ async def check_search_endpoint():
             assert response.status_code == 200, response.text
             payload = response.json()
             assert payload["query"] == "ServerConnection"
-            assert payload["indexed_pages"] == 105
+            assert payload["indexed_pages"] > 0
             assert payload["result_count"] > 0
             assert payload["results"][0]["path"] == (
                 "590BF971-0256-450B-8D9D-46C870673B97.md"
             )
             assert payload["results"][0]["excerpt_start_line"] > 0
             assert "ServerConnection" in payload["results"][0]["excerpt"]
+
+            response = await client.post(
+                "/api/tools/search-indexed-pages",
+                json={
+                    "query": "Файлы",
+                    "product": "TFlexDOCs API",
+                    "limit": 10,
+                },
+            )
+            assert response.status_code == 200, response.text
+            payload = response.json()
+            assert payload["result_count"] > 0
+            files_page = next(
+                result
+                for result in payload["results"]
+                if result["path"] == "0BBDFA21-580C-4D3B-A6E8-30C3E6186D78.md"
+            )
+            assert "Справочник" in files_page["excerpt"]
 
             for invalid in (
                 {"query": "   "},

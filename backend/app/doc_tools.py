@@ -11,6 +11,7 @@
 import asyncio
 import math
 import re
+import unicodedata
 from pathlib import Path, PureWindowsPath
 
 from pydantic_ai import ModelRetry
@@ -113,9 +114,10 @@ def _stem_russian(word: str) -> str:
 
 
 def _bm25_tokens(text: str) -> list[str]:
+    text = unicodedata.normalize("NFC", text.casefold())
     return [
         _stem_russian(token)
-        for token in _BM25_TOKEN_RE.findall(text.casefold())
+        for token in _BM25_TOKEN_RE.findall(text)
         if token not in _BM25_STOP_WORDS and len(token) > 1
     ]
 
