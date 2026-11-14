@@ -4,61 +4,36 @@ import logging
 import time
 
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Literal, TypedDict
-from urllib.parse import urlsplit
+from typing import AsyncIterator
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from openai import APIError
-from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
-from . import agent, db, models
+from . import agent, db
 from .config import (
     DB_PATH,
-    DEFAULT_CONTEXT_WINDOW_TOKENS,
     DOCS_ROOT,
 )
 from .doc_catalog import preload_doc_catalogs, search_indexed_pages
+from .model import (
+    ChatIn,
+    ChatMessagesOut,
+    ChatOut,
+    ChatSummary,
+    HealthOut,
+    IndexedPageSearchIn,
+    IndexedPageSearchOut,
+    IndexedPageSearchResultOut,
+    MessageIn,
+    ModelHealthOut,
+    ModelSettingsIn,
+    SettingsOut,
+)
 
 dbase = db.Database(str(DB_PATH))
 logger = logging.getLogger(__name__)
 MODEL_HEALTH_CACHE_TTL = 60 * 60
-
-
-class SettingsOut(TypedDict):
-    provider: str
-    model: str
-    base_url: str
-    api_key_configured: bool
-    context_window_tokens: int
-    max_agent_response_tokens: int
-    max_critic_response_tokens: int
-
-
-class ChatOut(TypedDict):
-    id: int
-    title: str
-    created_at: str
-    updated_at: str
-
-
-class HealthOut(TypedDict):
-    status: Literal["ok"]
-    model: str
-    provider: str
-    docs_root: str
-    context_token_limit: int
-
-
-class ModelHealthOut(TypedDict):
-    status: Literal["ok", "error"]
-    model: str
-    detail: str
-
-
-class ChatMessagesOut(TypedDict):
-    chat: ChatOut
-    messages: list[models.Message]
 
 
 _model_health_cache: ModelHealthOut | None = None
@@ -92,109 +67,6 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Docs AI Agent", lifespan=lifespan)
 
 
-# -------------------------------------------------------------------
-# Модели запросов
-# -------------------------------------------------------------------
-
-
-class ChatIn(BaseModel):
-    title: str = "Новый чат"
-
-
-class MessageIn(BaseModel):
-    content: str
-
-
-class IndexedPageSearchIn(BaseModel):
-    query: str = Field(min_length=1, max_length=500)
-    product: Literal["TFlexCAD API", "TFlexDOCs API"] = "TFlexDOCs API"
-    limit: int = Field(default=10, ge=1, le=20)
-
-    @field_validator("query")
-    @classmethod
-    def trim_query(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("Укажите поисковый запрос")
-        return value
-
-
-class IndexedPageSearchResultOut(BaseModel):
-    title: str
-    path: str
-    breadcrumb: str
-    section: str
-    keywords: list[str]
-    intro: str
-    excerpt: str
-    excerpt_start_line: int
-    excerpt_end_line: int
-
-
-class IndexedPageSearchOut(BaseModel):
-    query: str
-    product: str
-    indexed_pages: int
-    result_count: int
-    elapsed_ms: float
-    results: list[IndexedPageSearchResultOut]
-
-
-class ModelSettingsIn(BaseModel):
-    provider: Literal["openai", "openrouter", "ollama", "lmstudio", "custom"]
-    model: str = Field(min_length=1, max_length=200)
-    base_url: str | None = Field(default=None, max_length=2048)
-    api_key: str | None = Field(default=None, max_length=4096)
-    clear_api_key: bool = False
-    context_window_tokens: int = Field(
-        default=DEFAULT_CONTEXT_WINDOW_TOKENS, ge=4096, le=2_000_000
-    )
-    max_agent_response_tokens: int = Field(
-        default=agent.MAX_AGENT_RESPONSE_TOKENS, ge=256, le=32_768
-    )
-    max_critic_response_tokens: int = Field(
-        default=agent.MAX_CRITIC_RESPONSE_TOKENS, ge=256, le=16_384
-    )
-
-    @field_validator("model")
-    @classmethod
-    def validate_model(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("Укажите название модели")
-        return value
-
-    @field_validator("base_url")
-    @classmethod
-    def validate_base_url(cls, value: str | None, info: ValidationInfo) -> str | None:
-        value = (value or "").strip()
-        if not value:
-            provider = info.data.get("provider")
-            if provider == "openrouter":
-                return "https://openrouter.ai/api/v1"
-            if provider == "ollama":
-                return "http://host.docker.internal:11434/v1"
-            if provider == "lmstudio":
-                return "http://host.docker.internal:1234/v1"
-            if provider == "custom":
-                raise ValueError("Для пользовательского провайдера укажите API-адрес")
-            return None
-        parsed = urlsplit(value)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            raise ValueError("Адрес должен начинаться с http:// или https://")
-        if parsed.username or parsed.password or parsed.query or parsed.fragment:
-            raise ValueError("Адрес не должен содержать логин, пароль, параметры или фрагмент")
-        try:
-            parsed.port
-        except ValueError as exc:
-            raise ValueError("Порт в API-адресе указан некорректно") from exc
-        return value.rstrip("/")
-
-    @field_validator("api_key")
-    @classmethod
-    def trim_api_key(cls, value: str | None) -> str | None:
-        return value.strip() if value is not None else None
-
 def _settings_out(settings: agent.ModelSettings) -> SettingsOut:
     return {
         "provider": settings.provider,
@@ -207,7 +79,7 @@ def _settings_out(settings: agent.ModelSettings) -> SettingsOut:
     }
 
 
-def _chat_out(chat: models.ChatSummary) -> ChatOut:
+def _chat_out(chat: ChatSummary) -> ChatOut:
     return {
         "id": chat["id"],
         "title": chat["title"],

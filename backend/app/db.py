@@ -2,7 +2,7 @@ import json
 
 import aiosqlite
 
-from .models import Chat, ChatSummary, Message, ModelSettings
+from .model import Chat, ChatSummary, Message, ModelSettings
 from .config import DB_PATH, DEFAULT_CONTEXT_WINDOW_TOKENS
 
 
