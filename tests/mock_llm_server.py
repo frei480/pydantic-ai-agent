@@ -145,7 +145,38 @@ class Handler(BaseHTTPRequestHandler):
                 f"MOCK: turn={turn} streaming={streaming}",
                 flush=True,
             )
-            if turn == 1:
+            if os.getenv("MOCK_DELEGATION") == "1":
+                if turn == 1:
+                    args = json.dumps(
+                        {
+                            "agent_name": "tflex_docs_researcher",
+                            "task": "Найди сведения о макросах T-FLEX DOCs.",
+                        }
+                    )
+                    chunks = [_tool_chunk("delegate_task", args)]
+                elif turn == 2:
+                    chunks = [_text_chunk(
+                        "ФАКТЫ:\n- Найдено руководство по макросам (macro.md:12)\n"
+                        "ЕДИНИЦЫ API: MacroProvider\nПРОБЕЛЫ: нет"
+                    )]
+                elif turn == 3:
+                    chunks = [_text_chunk(
+                        "ФАКТЫ:\n- Субагент вернул сведения о макросах (macro.md:12)\n"
+                        "ПРОБЕЛЫ: нет"
+                    )]
+                elif turn == 4:
+                    args = json.dumps(
+                        {
+                            "is_sufficient": True,
+                            "missing_info": [],
+                            "search_queries": [],
+                            "comments": "фактов достаточно",
+                        }
+                    )
+                    chunks = [_tool_chunk(final_tool, args, tool_id="t2")]
+                else:
+                    chunks = [_text_chunk("Ответ подготовлен на основании фактов субагента.")]
+            elif turn == 1:
                 args = json.dumps({"pattern": "SplineConstruction", "literal": True})
                 chunks = [_tool_chunk("search_docs", args)]
             elif turn == 2:

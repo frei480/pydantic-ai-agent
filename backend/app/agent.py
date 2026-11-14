@@ -32,7 +32,7 @@ from pydantic_ai import (
 from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
-from pydantic_ai_harness import Skills
+from pydantic_ai_harness import Skills, SubAgent, SubAgents
 
 from .config import (
     CHARS_PER_TOKEN,
@@ -168,6 +168,34 @@ T-FLEX CAD (геометрия и CAD-документы) или T-FLEX DOCs (м
 ПРОБЕЛЫ: (что осталось неизвестным/неподтверждённым)
 
 Отвечай на языке пользователя (по умолчанию — русский).
+"""
+
+DOMAIN_DELEGATION_INSTRUCTIONS = """Для предметного исследования используй делегирование:
+передай задачу агенту `tflex_docs_researcher` для T-FLEX DOCs или
+`tflex_cad_researcher` для T-FLEX CAD через `delegate_task`. Если вопрос охватывает
+оба продукта, делегируй каждому отдельную узкую подзадачу. Попроси вернуть только
+проверенные факты со ссылками `файл:строка`, точные сигнатуры и существенные пробелы.
+Не проси субагента писать финальный ответ или предполагать неподтверждённое. Используй
+его результат как источник для собственного исследования и проверки, а не как замену
+проверке документации.
+"""
+
+DOCS_SPECIALIST_INSTRUCTIONS = """Ты — субагент-исследователь T-FLEX DOCs Open API.
+Работай только с продуктом TFlexDOCs API; не смешивай его с T-FLEX CAD. Выполни
+узкую задачу родительского исследователя. Используй search_doc_topics для навигации,
+затем search_docs, file_info и read_file для проверки конкретных сведений. Ищи только
+нужные страницы и читай их; возвращай факты с точными ссылками файл:строка,
+сигнатуры членов и существенные пробелы. Не пиши код решения и не делай выводов за
+пределами документации.
+"""
+
+CAD_SPECIALIST_INSTRUCTIONS = """Ты — субагент-исследователь T-FLEX CAD Open API.
+Работай только с продуктом TFlexCAD API; не смешивай его с T-FLEX DOCs. Выполни
+узкую задачу родительского исследователя. Используй search_doc_topics для навигации,
+затем search_docs, file_info и read_file для проверки конкретных сведений. Ищи только
+нужные страницы и читай их; возвращай факты с точными ссылками файл:строка,
+сигнатуры членов и существенные пробелы. Не пиши код решения и не делай выводов за
+пределами документации.
 """
 
 CRITIC_INSTRUCTIONS = """Ты — практичный технический критик результата исследования документации API.
@@ -673,15 +701,56 @@ async def run_pipeline(
     if history_json:
         base_history = ModelMessagesTypeAdapter.validate_json(history_json)
 
-    researcher = Agent(
+    docs_specialist = Agent(
         _build_model(settings.model, settings),
-        instructions=RESEARCH_INSTRUCTIONS,
+        name="tflex_docs_researcher",
+        instructions=DOCS_SPECIALIST_INSTRUCTIONS,
         model_settings=model_settings,
         capabilities=[
             Skills(
                 ".",
                 workspace=SkillWorkspaceBackend(Path(__file__).parent / "skills"),
             )
+        ],
+        retries=2,
+    )
+    register_tools(docs_specialist, tool_budget, rank_query=user_text)
+    cad_specialist = Agent(
+        _build_model(settings.model, settings),
+        name="tflex_cad_researcher",
+        instructions=CAD_SPECIALIST_INSTRUCTIONS,
+        model_settings=model_settings,
+        retries=2,
+    )
+    register_tools(cad_specialist, tool_budget, rank_query=user_text)
+    specialist_delegation = SubAgents(
+        agents=[
+            SubAgent(
+                agent=docs_specialist,
+                description="Исследует T-FLEX DOCs Open API, макросы и данные DOCs.",
+                usage_limits=UsageLimits(request_limit=12),
+                max_calls=1,
+            ),
+            SubAgent(
+                agent=cad_specialist,
+                description="Исследует T-FLEX CAD Open API, документы и геометрию.",
+                usage_limits=UsageLimits(request_limit=12),
+                max_calls=1,
+            ),
+        ],
+        forward_usage=True,
+        max_depth=1,
+    )
+    researcher = Agent(
+        _build_model(settings.model, settings),
+        instructions=RESEARCH_INSTRUCTIONS + "\n" + DOMAIN_DELEGATION_INSTRUCTIONS,
+        model_settings=model_settings,
+        capabilities=[
+            Skills(
+                ".",
+                workspace=SkillWorkspaceBackend(Path(__file__).parent / "skills"),
+            ),
+            specialist_delegation,
         ],
         retries=2,
     )
