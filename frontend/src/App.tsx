@@ -660,6 +660,9 @@ function App() {
               <div className="mt-0.5 truncate text-[10px] text-slate-400">С опорой на API-документацию</div>
             </div>
           </div>
+          <a href="/admin" className="mt-2 flex items-center gap-2 rounded-lg px-3 py-2 text-[11px] text-slate-500 transition hover:bg-slate-50 hover:text-[#315fce]">
+            <Settings2 size={14} /> Администрирование агента
+          </a>
         </div>
       </aside>
 

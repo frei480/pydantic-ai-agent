@@ -12,6 +12,7 @@
 """
 
 import asyncio
+import copy
 from collections.abc import AsyncIterable, AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -65,6 +66,7 @@ from .doc_tools import (
     ripgrep_search,
     safe_resolve,
 )
+from .model import AdminPrompts, AdminSubAgent, AgentAdminConfig
 from .skill_workspace import SkillWorkspaceBackend
 
 @dataclass(frozen=True)
@@ -190,16 +192,12 @@ T-FLEX CAD (геометрия и CAD-документы) или T-FLEX DOCs (м
 """
 
 DOMAIN_DELEGATION_INSTRUCTIONS = """Для предметного исследования используй делегирование:
-передай задачу агенту `tflex_docs_researcher` для T-FLEX DOCs. Для T-FLEX CAD выбери
-субагента по сценарию: `tflex_cad_document_researcher` для документа и общих операций
-(открытие, создание, поиск, изменение, сохранение, удаление), `tflex_cad_2d_researcher`
-для 2D-геометрии и оформления или `tflex_cad_3d_researcher` для 3D-узлов, профилей,
-рабочих плоскостей, путей и операций. Если сценарий действительно пересекает домены,
-раздели его на узкие подзадачи и делегируй отдельно. При вопросе о двух продуктах
-делегируй каждому отдельную подзадачу. Попроси вернуть только проверенные факты со
-ссылками `файл:строка`, точные сигнатуры и существенные пробелы. Не проси субагента
-писать финальный ответ или предполагать неподтверждённое. Используй его результат как
-источник для собственного исследования и проверки, а не как замену проверке документации.
+выбирай субагента из списка доступных ниже по его специализации и описанию. Если сценарий
+затрагивает несколько предметных областей, раздели его на узкие подзадачи и делегируй
+каждую подходящему субагенту. Попроси вернуть только проверенные факты со ссылками
+`файл:строка`, точные сигнатуры и существенные пробелы. Не проси субагента писать
+финальный ответ или предполагать неподтверждённое. Используй его результат как источник
+для собственного исследования и проверки, а не как замену проверке документации.
 """
 
 DOCS_SPECIALIST_INSTRUCTIONS = """Ты — субагент-исследователь T-FLEX DOCs Open API.
@@ -294,6 +292,64 @@ WRITER_INSTRUCTIONS = """Ты — инженер-технический писа
 только для навигации. Руководства по поиску не являются источниками API. Инструменты
 используй лишь для быстрой проверки отдельной детали.
 Без длинных вступлений — сразу к делу. Отвечай на языке пользователя (по умолчанию русский)."""
+
+
+def default_agent_admin_config() -> AgentAdminConfig:
+    return AgentAdminConfig(
+        prompts=AdminPrompts(
+            researcher=RESEARCH_INSTRUCTIONS,
+            delegation=DOMAIN_DELEGATION_INSTRUCTIONS,
+            critic=CRITIC_INSTRUCTIONS,
+            writer=WRITER_INSTRUCTIONS,
+        ),
+        subagents=[
+            AdminSubAgent(
+                name="tflex_docs_researcher",
+                description="Исследует T-FLEX DOCs Open API, макросы и данные DOCs.",
+                instructions=DOCS_SPECIALIST_INSTRUCTIONS,
+            ),
+            AdminSubAgent(
+                name="tflex_cad_document_researcher",
+                description=(
+                    "Исследует T-FLEX CAD: открытие, получение объектов, создание, "
+                    "изменение, сохранение и закрытие документа."
+                ),
+                instructions=CAD_DOCUMENT_SPECIALIST_INSTRUCTIONS,
+            ),
+            AdminSubAgent(
+                name="tflex_cad_2d_researcher",
+                description=(
+                    "Исследует T-FLEX CAD 2D API: узлы, построения, линии изображения, "
+                    "размеры, оформление и фрагменты."
+                ),
+                instructions=CAD_2D_SPECIALIST_INSTRUCTIONS,
+            ),
+            AdminSubAgent(
+                name="tflex_cad_3d_researcher",
+                description=(
+                    "Исследует T-FLEX CAD 3D API: узлы, профили, пути, рабочие "
+                    "поверхности, операции и преобразования."
+                ),
+                instructions=CAD_3D_SPECIALIST_INSTRUCTIONS,
+            ),
+        ],
+    )
+
+
+_agent_admin_config = default_agent_admin_config()
+_skill_root = Path(__file__).parent / "skills"
+
+
+def configure_agent_admin_content(
+    config: AgentAdminConfig, skill_root: Path
+) -> None:
+    global _agent_admin_config, _skill_root
+    _agent_admin_config = config.model_copy(deep=True)
+    _skill_root = skill_root.resolve()
+
+
+def current_agent_admin_config() -> AgentAdminConfig:
+    return _agent_admin_config.model_copy(deep=True)
 
 
 
@@ -870,6 +926,19 @@ async def run_pipeline(
 ) -> AsyncIterator[dict[str, object]]:
     """Агентский цикл. Генератор событий для SSE; последнее событие — «final»."""
     settings = current_model_settings()
+    admin_config = current_agent_admin_config()
+    research_instructions = (
+        admin_config.prompts.researcher
+        + "\n"
+        + admin_config.prompts.delegation
+        + "\n\nДоступные субагенты:\n"
+        + "\n".join(
+            f"- {subagent.name}: {subagent.description}"
+            for subagent in admin_config.subagents
+        )
+    )
+    critic_instructions = admin_config.prompts.critic
+    writer_instructions = admin_config.prompts.writer
     context_window_tokens = settings.context_window_tokens
     response_tokens = _response_token_limit(
         context_window_tokens, settings.max_agent_response_tokens
@@ -896,110 +965,49 @@ async def run_pipeline(
     if history_json:
         base_history = ModelMessagesTypeAdapter.validate_json(history_json)
 
-    docs_specialist = Agent(
-        _build_model(settings.model, settings),
-        name="tflex_docs_researcher",
-        instructions=DOCS_SPECIALIST_INSTRUCTIONS,
-        model_settings=model_settings,
-        capabilities=[
-            Skills(
-                ".",
-                workspace=SkillWorkspaceBackend(Path(__file__).parent / "skills"),
+    delegated_agents = []
+    for subagent_config in admin_config.subagents:
+        capabilities = (
+            [
+                Skills(
+                    ".",
+                    workspace=SkillWorkspaceBackend(_skill_root),
+                )
+            ]
+            if subagent_config.skills_enabled
+            else []
+        )
+        subagent = Agent(
+            _build_model(settings.model, settings),
+            name=subagent_config.name,
+            instructions=subagent_config.instructions,
+            model_settings=model_settings,
+            capabilities=capabilities,
+            retries=2,
+        )
+        register_tools(subagent, tool_budget, rank_query=user_text)
+        delegated_agents.append(
+            SubAgent(
+                agent=subagent,
+                description=subagent_config.description,
+                usage_limits=UsageLimits(request_limit=12),
+                max_calls=1,
             )
-        ],
-        retries=2,
-    )
-    register_tools(docs_specialist, tool_budget, rank_query=user_text)
-    cad_document_specialist = Agent(
-        _build_model(settings.model, settings),
-        name="tflex_cad_document_researcher",
-        instructions=CAD_DOCUMENT_SPECIALIST_INSTRUCTIONS,
-        model_settings=model_settings,
-        capabilities=[
-            Skills(
-                ".",
-                workspace=SkillWorkspaceBackend(Path(__file__).parent / "skills"),
-            )
-        ],
-        retries=2,
-    )
-    register_tools(cad_document_specialist, tool_budget, rank_query=user_text)
-    cad_2d_specialist = Agent(
-        _build_model(settings.model, settings),
-        name="tflex_cad_2d_researcher",
-        instructions=CAD_2D_SPECIALIST_INSTRUCTIONS,
-        model_settings=model_settings,
-        capabilities=[
-            Skills(
-                ".",
-                workspace=SkillWorkspaceBackend(Path(__file__).parent / "skills"),
-            )
-        ],
-        retries=2,
-    )
-    register_tools(cad_2d_specialist, tool_budget, rank_query=user_text)
-    cad_3d_specialist = Agent(
-        _build_model(settings.model, settings),
-        name="tflex_cad_3d_researcher",
-        instructions=CAD_3D_SPECIALIST_INSTRUCTIONS,
-        model_settings=model_settings,
-        capabilities=[
-            Skills(
-                ".",
-                workspace=SkillWorkspaceBackend(Path(__file__).parent / "skills"),
-            )
-        ],
-        retries=2,
-    )
-    register_tools(cad_3d_specialist, tool_budget, rank_query=user_text)
+        )
     specialist_delegation = SubAgents(
-        agents=[
-            SubAgent(
-                agent=docs_specialist,
-                description="Исследует T-FLEX DOCs Open API, макросы и данные DOCs.",
-                usage_limits=UsageLimits(request_limit=12),
-                max_calls=1,
-            ),
-            SubAgent(
-                agent=cad_document_specialist,
-                description=(
-                    "Исследует T-FLEX CAD: открытие, получение объектов, создание, "
-                    "изменение, сохранение и закрытие документа."
-                ),
-                usage_limits=UsageLimits(request_limit=12),
-                max_calls=1,
-            ),
-            SubAgent(
-                agent=cad_2d_specialist,
-                description=(
-                    "Исследует T-FLEX CAD 2D API: узлы, построения, линии изображения, "
-                    "размеры, оформление и фрагменты."
-                ),
-                usage_limits=UsageLimits(request_limit=12),
-                max_calls=1,
-            ),
-            SubAgent(
-                agent=cad_3d_specialist,
-                description=(
-                    "Исследует T-FLEX CAD 3D API: узлы, профили, пути, рабочие "
-                    "поверхности, операции и преобразования."
-                ),
-                usage_limits=UsageLimits(request_limit=12),
-                max_calls=1,
-            ),
-        ],
+        agents=delegated_agents,
         forward_usage=True,
         max_depth=2,
         event_stream_handler=stream_child_events,
     )
     researcher = Agent(
         _build_model(settings.model, settings),
-        instructions=RESEARCH_INSTRUCTIONS + "\n" + DOMAIN_DELEGATION_INSTRUCTIONS,
+        instructions=research_instructions,
         model_settings=model_settings,
         capabilities=[
             Skills(
                 ".",
-                workspace=SkillWorkspaceBackend(Path(__file__).parent / "skills"),
+                workspace=SkillWorkspaceBackend(_skill_root),
             ),
             specialist_delegation,
         ],
@@ -1008,19 +1016,19 @@ async def run_pipeline(
     register_tools(researcher, tool_budget, rank_query=user_text)
     critic = Agent(
         _build_model(RAW_CRITIC_MODEL and CRITIC_MODEL_NAME or settings.model, settings),
-        instructions=CRITIC_INSTRUCTIONS,
+        instructions=critic_instructions,
         model_settings=critic_model_settings,
         output_type=Critique,
         retries=2,
     )
     writer = Agent(
         _build_model(settings.model, settings),
-        instructions=WRITER_INSTRUCTIONS,
+        instructions=writer_instructions,
         model_settings=model_settings,
         capabilities=[
             Skills(
                 ".",
-                workspace=SkillWorkspaceBackend(Path(__file__).parent / "skills"),
+                workspace=SkillWorkspaceBackend(_skill_root),
             )
         ],
         retries=2,
@@ -1037,7 +1045,7 @@ async def run_pipeline(
         # --- фаза: исследование ---
         yield {"type": "phase", "phase": "research", "round": round_no}
         research_history, prompt, dropped, truncated = _fit_context(
-            research_history, prompt, RESEARCH_INSTRUCTIONS, research_input_tokens
+            research_history, prompt, research_instructions, research_input_tokens
         )
         if dropped:
             yield {
@@ -1104,7 +1112,7 @@ async def run_pipeline(
         if tool_events:
             critique_input += "\n\nВыполненные поиска:\n" + "\n".join(tool_events[-12:])
         _, critique_input, _, truncated = _fit_context(
-            None, critique_input, CRITIC_INSTRUCTIONS, input_tokens
+            None, critique_input, critic_instructions, input_tokens
         )
         if truncated:
             yield {
@@ -1144,7 +1152,7 @@ async def run_pipeline(
         f"Собранные факты из документации:\n{draft}"
     )
     research_history, writer_prompt, dropped, truncated = _fit_context(
-        research_history, writer_prompt, WRITER_INSTRUCTIONS, research_input_tokens
+        research_history, writer_prompt, writer_instructions, research_input_tokens
     )
     if dropped:
         yield {

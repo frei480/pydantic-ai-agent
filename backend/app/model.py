@@ -1,3 +1,4 @@
+import re
 from typing import Literal, TypedDict
 from urllib.parse import urlsplit
 
@@ -171,3 +172,60 @@ class ModelSettingsIn(BaseModel):
     @classmethod
     def trim_api_key(cls, value: str | None) -> str | None:
         return value.strip() if value is not None else None
+
+
+class AdminLoginIn(BaseModel):
+    password: str = Field(min_length=1, max_length=1024)
+
+
+class AdminSessionOut(BaseModel):
+    authenticated: bool = True
+
+
+class AdminPrompts(BaseModel):
+    researcher: str = Field(min_length=1, max_length=100_000)
+    delegation: str = Field(min_length=1, max_length=30_000)
+    critic: str = Field(min_length=1, max_length=30_000)
+    writer: str = Field(min_length=1, max_length=30_000)
+
+
+class AdminSubAgent(BaseModel):
+    name: str = Field(min_length=3, max_length=64)
+    description: str = Field(min_length=1, max_length=2_000)
+    instructions: str = Field(min_length=1, max_length=50_000)
+    skills_enabled: bool = True
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        if not re.fullmatch(r"[a-z][a-z0-9_]{2,63}", value):
+            raise ValueError("ID должен содержать строчные латинские буквы, цифры и _")
+        return value
+
+
+class AgentAdminConfig(BaseModel):
+    prompts: AdminPrompts
+    subagents: list[AdminSubAgent] = Field(min_length=1, max_length=32)
+
+    @field_validator("subagents")
+    @classmethod
+    def validate_unique_subagents(
+        cls, value: list[AdminSubAgent]
+    ) -> list[AdminSubAgent]:
+        names = [subagent.name for subagent in value]
+        if len(set(names)) != len(names):
+            raise ValueError("ID субагентов должны быть уникальными")
+        return value
+
+
+class SkillContentIn(BaseModel):
+    content: str = Field(min_length=1, max_length=131_072)
+
+
+class SkillSummaryOut(BaseModel):
+    name: str
+    description: str
+
+
+class SkillOut(SkillSummaryOut):
+    content: str

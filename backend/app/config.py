@@ -3,6 +3,7 @@ from pathlib import Path
 
 DOCS_ROOT = Path(os.getenv("DOCS_ROOT", "/app/docs")).resolve()
 DB_PATH = Path(os.getenv("DB_PATH", "/app/data/chats.db"))
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 
 # --- модель ---
 RAW_MODEL = os.getenv("AI_MODEL", "openai:gpt-4o-mini").strip()
