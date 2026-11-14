@@ -14,6 +14,7 @@
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from httpx2 import Response
@@ -31,6 +32,7 @@ from pydantic_ai import (
 from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai_harness import Skills
 
 from .config import (
     CHARS_PER_TOKEN,
@@ -56,6 +58,7 @@ from .doc_tools import (
     ripgrep_search,
     safe_resolve,
 )
+from .skill_workspace import SkillWorkspaceBackend
 
 @dataclass(frozen=True)
 class ModelSettings:
@@ -626,6 +629,12 @@ async def run_pipeline(
         _build_model(settings.model, settings),
         instructions=RESEARCH_INSTRUCTIONS,
         model_settings=model_settings,
+        capabilities=[
+            Skills(
+                ".",
+                workspace=SkillWorkspaceBackend(Path(__file__).parent / "skills"),
+            )
+        ],
         retries=2,
     )
     register_tools(researcher, tool_budget, rank_query=user_text)
