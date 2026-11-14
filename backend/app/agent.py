@@ -12,7 +12,7 @@
 """
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterable, AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -26,6 +26,7 @@ from pydantic_ai import (
     ModelRetry,
     ModelRequestNode,
     ModelSettings as PydanticModelSettings,
+    RunContext,
     UsageLimits,
     messages as ai_messages,
 )
@@ -617,14 +618,72 @@ class TurnResult:
         self.messages_json: bytes = b""
 
 
+@dataclass(frozen=True)
+class ActivityEvent:
+    kind: Literal["tool", "agent", "skill"]
+    detail: str
+    agent_name: str | None = None
+    task: str | None = None
+    skill_name: str | None = None
+
+
+def _activity_from_tool_call(part: ai_messages.ToolCallPart) -> ActivityEvent:
+    arguments = part.args_as_dict()
+
+    if part.tool_name == "delegate_task":
+        agent_name = arguments.get("agent_name")
+        task = arguments.get("task")
+        if isinstance(agent_name, str) and agent_name:
+            return ActivityEvent(
+                "agent",
+                agent_name,
+                agent_name=agent_name,
+                task=task if isinstance(task, str) else None,
+            )
+
+    if part.tool_name == "load_capability":
+        skill_name = arguments.get("id")
+        if isinstance(skill_name, str) and skill_name:
+            return ActivityEvent("skill", skill_name, skill_name=skill_name)
+
+    return ActivityEvent(
+        "tool", f"{part.tool_name}({str(part.args)[:160]})"
+    )
+
+
+async def _stream_child_skill_loads(
+    ctx: RunContext[None],
+    events: AsyncIterable[ai_messages.AgentStreamEvent],
+    activity_events: list[tuple[str, str]],
+) -> None:
+    pending: dict[str, str] = {}
+    async for event in events:
+        if isinstance(event, ai_messages.FunctionToolCallEvent):
+            activity = _activity_from_tool_call(event.part)
+            if activity.kind == "skill" and activity.skill_name:
+                pending[event.part.tool_call_id] = activity.skill_name
+        elif isinstance(event, ai_messages.FunctionToolResultEvent):
+            skill_name = pending.pop(event.part.tool_call_id, None)
+            if skill_name and event.part.outcome == "success":
+                agent_name = ctx.agent.name if ctx.agent and ctx.agent.name else "субагент"
+                activity_events.append((agent_name, skill_name))
+
+
 async def _iter_agent_turn(
     agent: Agent,
     prompt: str,
     history: list[ModelMessage] | None,
     usage_limits: UsageLimits,
-) -> AsyncIterator[tuple[Literal["text", "tool"], str] | tuple[Literal["result"], TurnResult]]:
+) -> AsyncIterator[
+    tuple[Literal["text"], str]
+    | tuple[Literal["activity"], ActivityEvent]
+    | tuple[Literal["result"], TurnResult]
+]:
     """Один ход агента: события (text|tool|result); в конце ('messages', json)."""
     result = TurnResult()
+    pending_skill_loads: dict[str, ActivityEvent] = {}
+    pending_delegations: dict[str, str] = {}
+    active_delegations: list[str] = []
     async with agent.iter(
         user_prompt=prompt,
         message_history=history,
@@ -639,8 +698,32 @@ async def _iter_agent_turn(
                 async with node.stream(run.ctx) as event_stream:
                     async for event in event_stream:
                         if isinstance(event, ai_messages.FunctionToolCallEvent):
-                            detail = f"{event.part.tool_name}({str(event.part.args)[:160]})"
-                            yield ("tool", detail)
+                            activity = _activity_from_tool_call(event.part)
+                            if activity.kind == "skill":
+                                pending_skill_loads[event.part.tool_call_id] = activity
+                            else:
+                                if activity.kind == "agent" and activity.agent_name:
+                                    pending_delegations[event.part.tool_call_id] = (
+                                        activity.agent_name
+                                    )
+                                    active_delegations.append(activity.agent_name)
+                                yield ("activity", activity)
+                        elif isinstance(event, ai_messages.FunctionToolResultEvent):
+                            activity = pending_skill_loads.pop(event.part.tool_call_id, None)
+                            if activity and event.part.outcome == "success":
+                                if len(active_delegations) == 1:
+                                    activity = ActivityEvent(
+                                        activity.kind,
+                                        activity.detail,
+                                        agent_name=active_delegations[0],
+                                        skill_name=activity.skill_name,
+                                    )
+                                yield ("activity", activity)
+                            delegated_agent = pending_delegations.pop(
+                                event.part.tool_call_id, None
+                            )
+                            if delegated_agent in active_delegations:
+                                active_delegations.remove(delegated_agent)
         run_result = run.result
         if run_result is None:
             raise RuntimeError("ход агента не завершился результатом")
@@ -732,6 +815,13 @@ async def run_pipeline(
     critic_model_settings: PydanticModelSettings = {
         "max_tokens": critic_response_tokens
     }
+    child_skill_loads: list[tuple[str, str]] = []
+
+    async def stream_child_events(
+        ctx: RunContext[None],
+        events: AsyncIterable[ai_messages.AgentStreamEvent],
+    ) -> None:
+        await _stream_child_skill_loads(ctx, events, child_skill_loads)
     base_history: list[ModelMessage] = []
     if history_json:
         base_history = ModelMessagesTypeAdapter.validate_json(history_json)
@@ -890,18 +980,48 @@ async def run_pipeline(
                 "message": "Текст запроса сокращён, чтобы вместить его в окно контекста модели.",
             }
         tool_events: list[str] = []
+        child_skill_load_start = len(child_skill_loads)
+        reported_child_skills: set[tuple[str, str]] = set()
         async for kind, payload in _iter_agent_turn(
             researcher, prompt, research_history, usage_limits
         ):
             if kind == "text" and isinstance(payload, str):
                 yield {"type": "draft", "text": payload}
-            elif kind == "tool" and isinstance(payload, str):
-                tool_events.append(payload)
-                yield {"type": "tool", "detail": payload}
+            elif kind == "activity" and isinstance(payload, ActivityEvent):
+                tool_events.append(payload.detail)
+                if payload.kind == "agent":
+                    yield {
+                        "type": "agent",
+                        "agent_name": payload.agent_name,
+                        "task": payload.task,
+                        "phase": "research",
+                    }
+                elif payload.kind == "skill":
+                    if payload.agent_name and payload.skill_name:
+                        reported_child_skills.add(
+                            (payload.agent_name, payload.skill_name)
+                        )
+                    yield {
+                        "type": "skill",
+                        "skill_name": payload.skill_name,
+                        "agent_name": payload.agent_name,
+                        "phase": "research",
+                    }
+                else:
+                    yield {"type": "tool", "detail": payload.detail}
             elif kind == "result":
                 assert isinstance(payload, TurnResult)
                 draft = payload.output
                 research_messages_json = payload.messages_json
+        for agent_name, skill_name in child_skill_loads[child_skill_load_start:]:
+            if (agent_name, skill_name) in reported_child_skills:
+                continue
+            yield {
+                "type": "skill",
+                "skill_name": skill_name,
+                "agent_name": agent_name,
+                "phase": "research",
+            }
         research_history = (
             ModelMessagesTypeAdapter.validate_json(research_messages_json)
             if research_messages_json
@@ -968,6 +1088,7 @@ async def run_pipeline(
         }
     acc: list[str] = []
     writer_all: list[ModelMessage] = []
+    writer_skill_loads: dict[str, ActivityEvent] = {}
     async with writer.iter(
         user_prompt=writer_prompt,
         message_history=research_history,
@@ -978,6 +1099,29 @@ async def run_pipeline(
                 async for delta in _stream_text(node, wrun):
                     acc.append(delta)
                     yield {"type": "text", "text": delta}
+            elif Agent.is_call_tools_node(node):
+                async with node.stream(wrun.ctx) as event_stream:
+                    async for event in event_stream:
+                        if isinstance(event, ai_messages.FunctionToolCallEvent):
+                            activity = _activity_from_tool_call(event.part)
+                            if activity.kind == "skill":
+                                writer_skill_loads[event.part.tool_call_id] = activity
+                            else:
+                                yield {
+                                    "type": "agent" if activity.kind == "agent" else "tool",
+                                    "agent_name": activity.agent_name,
+                                    "task": activity.task,
+                                    "detail": activity.detail,
+                                    "phase": "write",
+                                }
+                        elif isinstance(event, ai_messages.FunctionToolResultEvent):
+                            activity = writer_skill_loads.pop(event.part.tool_call_id, None)
+                            if activity and event.part.outcome == "success":
+                                yield {
+                                    "type": "skill",
+                                    "skill_name": activity.skill_name,
+                                    "phase": "write",
+                                }
         if wrun.result is None:
             raise RuntimeError("писатель не завершился результатом")
         writer_all = list(wrun.result.all_messages())

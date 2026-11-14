@@ -44,7 +44,7 @@ type ChatMessage = {
 type ServiceHealth = "checking" | "ok" | "down";
 type Activity = {
   id: number;
-  kind: "phase" | "tool" | "draft" | "critique" | "warning";
+  kind: "phase" | "tool" | "agent" | "skill" | "draft" | "critique" | "warning";
   text: string;
   sufficient?: boolean;
 };
@@ -54,6 +54,9 @@ type StreamEvent = {
   phase?: string;
   round?: number;
   detail?: string;
+  agent_name?: string;
+  task?: string;
+  skill_name?: string;
   text?: string;
   message?: string;
   sufficient?: boolean;
@@ -450,6 +453,33 @@ function App() {
           }
           case "tool":
             addActivity({ kind: "tool", text: event.detail || "Вызван инструмент поиска" });
+            break;
+          case "agent": {
+            const agentLabels: Record<string, string> = {
+              tflex_docs_researcher: "T-FLEX DOCs",
+              tflex_cad_document_researcher: "T-FLEX CAD · документ",
+              tflex_cad_2d_researcher: "T-FLEX CAD · 2D",
+              tflex_cad_3d_researcher: "T-FLEX CAD · 3D",
+            };
+            const agent = event.agent_name || "неизвестный";
+            addActivity({
+              kind: "agent",
+              text: `Запущен субагент «${agentLabels[agent] || agent}»${event.task ? `: ${event.task}` : ""}`,
+            });
+            break;
+          }
+          case "skill":
+            if (event.skill_name) {
+              const actor = event.agent_name
+                ? ` · субагент ${event.agent_name}`
+                : event.phase === "write"
+                  ? " · писатель"
+                  : " · исследователь";
+              addActivity({
+                kind: "skill",
+                text: `Загружен навык «${event.skill_name}»${actor}`,
+              });
+            }
             break;
           case "draft":
             if (!draftSeen) {

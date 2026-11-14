@@ -15,7 +15,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 state = {"turn": 0, "failures_remaining": int(os.getenv("MOCK_502_FAILURES", "0"))}
 
 
-def _tool_chunk(name, args, tool_id="t1"):
+def _tool_chunk(name, args, tool_id=None):
+    tool_id = tool_id or f"t{state['turn']}"
     return {
         "delta": {
             "tool_calls": [
@@ -130,6 +131,11 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(payload)
             return
         tools = body.get("tools") or []
+        tool_names = {
+            tool.get("function", {}).get("name")
+            for tool in tools
+            if isinstance(tool, dict)
+        }
         final_tool = next(
             (
                 t["function"]["name"]
@@ -141,30 +147,40 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.endswith("/chat/completions"):
             state["turn"] += 1
             turn = state["turn"]
-            print(
-                f"MOCK: turn={turn} streaming={streaming}",
-                flush=True,
-            )
             if os.getenv("MOCK_DELEGATION") == "1":
-                if turn == 1:
-                    args = json.dumps(
-                        {
-                            "agent_name": "tflex_docs_researcher",
-                            "task": "Найди сведения о макросах T-FLEX DOCs.",
-                        }
+                messages = body.get("messages") or []
+                last_user = max(
+                    (
+                        index
+                        for index, message in enumerate(messages)
+                        if message.get("role") == "user"
+                    ),
+                    default=-1,
+                )
+                calls_since_user = [
+                    call.get("function", {}).get("name")
+                    for message in messages[last_user + 1 :]
+                    if message.get("role") == "assistant"
+                    for call in message.get("tool_calls") or []
+                ]
+                latest_user_content = (
+                    messages[last_user].get("content", "")
+                    if last_user >= 0
+                    else ""
+                )
+                has_delegated = any(
+                    message.get("role") == "assistant"
+                    and any(
+                        call.get("function", {}).get("name") == "delegate_task"
+                        for call in message.get("tool_calls") or []
                     )
-                    chunks = [_tool_chunk("delegate_task", args)]
-                elif turn == 2:
-                    chunks = [_text_chunk(
-                        "ФАКТЫ:\n- Найдено руководство по макросам (macro.md:12)\n"
-                        "ЕДИНИЦЫ API: MacroProvider\nПРОБЕЛЫ: нет"
-                    )]
-                elif turn == 3:
-                    chunks = [_text_chunk(
-                        "ФАКТЫ:\n- Субагент вернул сведения о макросах (macro.md:12)\n"
-                        "ПРОБЕЛЫ: нет"
-                    )]
-                elif turn == 4:
+                    for message in messages
+                )
+                is_child_prompt = (
+                    latest_user_content == "Найди сведения по запросу пользователя."
+                )
+                is_writer_prompt = "Напиши финальный ответ" in latest_user_content
+                if final_tool in tool_names:
                     args = json.dumps(
                         {
                             "is_sufficient": True,
@@ -173,9 +189,38 @@ class Handler(BaseHTTPRequestHandler):
                             "comments": "фактов достаточно",
                         }
                     )
-                    chunks = [_tool_chunk(final_tool, args, tool_id="t2")]
+                    chunks = [_tool_chunk(final_tool, args)]
+                elif (
+                    not has_delegated
+                    and not is_child_prompt
+                    and not is_writer_prompt
+                ):
+                    args = json.dumps(
+                        {
+                            "agent_name": os.getenv(
+                                "MOCK_DELEGATION_AGENT", "tflex_docs_researcher"
+                            ),
+                            "task": "Найди сведения по запросу пользователя.",
+                        }
+                    )
+                    chunks = [_tool_chunk("delegate_task", args)]
+                elif (
+                    os.getenv("MOCK_SKILL_LOADING") == "1"
+                    and "load_capability" in tool_names
+                    and "load_capability" not in calls_since_user
+                    and (is_child_prompt or is_writer_prompt)
+                ):
+                    args = json.dumps({"id": "tflex-cad-3d-modeling"})
+                    chunks = [_tool_chunk("load_capability", args)]
+                elif is_writer_prompt:
+                    chunks = [_text_chunk(
+                        "Ответ подготовлен на основании фактов субагента."
+                    )]
                 else:
-                    chunks = [_text_chunk("Ответ подготовлен на основании фактов субагента.")]
+                    chunks = [_text_chunk(
+                        "ФАКТЫ:\n- Субагент вернул сведения о макросах (macro.md:12)\n"
+                        "ПРОБЕЛЫ: нет"
+                    )]
             elif turn == 1:
                 args = json.dumps({"pattern": "SplineConstruction", "literal": True})
                 chunks = [_tool_chunk("search_docs", args)]
@@ -192,7 +237,7 @@ class Handler(BaseHTTPRequestHandler):
                         "comments": "фактов достаточно",
                     }
                 )
-                chunks = [_tool_chunk(final_tool, args, tool_id="t2")]
+                chunks = [_tool_chunk(final_tool, args)]
             else:
                 chunks = [_text_chunk("Ответ готов. ```csharp\nvar doc = TFlex.Application.ActiveDocument;\n```")]
             finish = (
