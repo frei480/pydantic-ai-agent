@@ -37,6 +37,7 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai_harness import Skills, SubAgent, SubAgents
 
 from .config import (
+    API_EXAMPLES_ROOT,
     CHARS_PER_TOKEN,
     CRITIC_MODEL_NAME,
     DEFAULT_CONTEXT_WINDOW_TOKENS,
@@ -56,6 +57,8 @@ from .doc_catalog import (
     search_indexed_pages as search_indexed_doc_pages,
     search_doc_topics as search_index_topics,
 )
+from .api_examples import read_api_example as read_api_example_source
+from .api_examples import search_api_examples as search_api_example_sources
 from .doc_tools import (
     ToolOutputBudget,
     count_lines,
@@ -212,6 +215,17 @@ read_file для проверки конкретных сведений. Ищи 
 пределами документации.
 """
 
+API_EXAMPLES_INSTRUCTIONS = """\
+Если задача относится к T-FLEX DOCs и для неё может быть полезен один из четырёх
+поставляемых примеров, после обязательного поиска search_indexed_pages для точного
+имени API найди сценарий через search_api_examples, затем при необходимости прочитай
+небольшой фрагмент через read_api_example. Эти исходники —
+иллюстрации реализации, а не авторитетная спецификация: сверяй существенные члены API
+с документацией TFlexDOCs API и указывай в ответе отдельно документацию и пример.
+Не используй пример как доказательство совместимости с другой версией API. Если каталог
+примеров не подключён или совпадений нет, продолжай поиск по документации.
+"""
+
 CAD_SPECIALIST_INSTRUCTIONS = """Ты — субагент-исследователь T-FLEX CAD Open API.
 Работай только с продуктом TFlexCAD API; не смешивай его с T-FLEX DOCs. Выполни
 узкую задачу родительского исследователя. Используй search_doc_topics для навигации.
@@ -331,6 +345,54 @@ def default_agent_admin_config() -> AgentAdminConfig:
                     "поверхности, операции и преобразования."
                 ),
                 instructions=CAD_3D_SPECIALIST_INSTRUCTIONS,
+            ),
+            AdminSubAgent(
+                name="tflex_docs_reference_importer",
+                description=(
+                    "Исследует импорт данных в справочники T-FLEX DOCs: схему, "
+                    "параметры, значения и создание объектов."
+                ),
+                instructions=DOCS_SPECIALIST_INSTRUCTIONS
+                + "\nСосредоточься на сценарии импорта из внешнего источника. "
+                "Используй пример ImportReference как ориентир, но проверь типы и "
+                "операции справочника в документации. Отделяй логику T-FLEX DOCs "
+                "от OleDb/Excel/Access и требований конкретного окружения.",
+            ),
+            AdminSubAgent(
+                name="tflex_docs_test_data_generator",
+                description=(
+                    "Исследует создание тестовых объектов справочников, параметров, "
+                    "иерархий и связей T-FLEX DOCs."
+                ),
+                instructions=DOCS_SPECIALIST_INSTRUCTIONS
+                + "\nСосредоточься на генерации объектов справочников и связей. "
+                "Используй ReferenceObjectsGenerator только как пример; проверь "
+                "сигнатуры, ограничения и жизненный цикл по документации. Отмечай "
+                "обработку отмены, ошибок и частично созданных данных.",
+            ),
+            AdminSubAgent(
+                name="tflex_docs_units_researcher",
+                description=(
+                    "Исследует единицы измерения и преобразование значений в "
+                    "T-FLEX DOCs."
+                ),
+                instructions=DOCS_SPECIALIST_INSTRUCTIONS
+                + "\nСосредоточься на поиске типов единиц, доступных единицах и "
+                "преобразовании значения. Сверяй точные члены и единицы измерения "
+                "аргументов по документации; отдельно учитывай владение и закрытие "
+                "ServerConnection.",
+            ),
+            AdminSubAgent(
+                name="tflex_docs_plugin_ui_researcher",
+                description=(
+                    "Исследует плагины T-FLEX DOCs, специальные справочники, "
+                    "команды интерфейса и графические элементы."
+                ),
+                instructions=DOCS_SPECIALIST_INSTRUCTIONS
+                + "\nСосредоточься на регистрации плагина и расширении UI. Используй "
+                "Graphs как пример конкретного сценария, но сверяй контракты плагина, "
+                "команд и представлений по документации. Разделяй API платформы и "
+                "UI-фреймворк.",
             ),
         ],
     )
@@ -541,6 +603,88 @@ def register_tools(
         return budget.limit_metadata(
             f"В кэше index.md страниц: {total}. "
             f"Релевантные страницы ({len(results)}):\n" + "\n".join(lines),
+            reserve_tokens=budget.read_token_limit + 512,
+        )
+
+    @agent.tool_plain
+    async def search_api_examples(
+        query: str, project: str = "", limit: int = 10
+    ) -> str:
+        """Поиск по исходникам четырёх примеров T-FLEX DOCs API.
+
+        Используй как подсказку для поиска практического сценария; документация
+        продукта остаётся источником подтверждения API.
+        project: необязательное точное имя Graphs, ImportReference,
+        ReferenceObjectsGenerator или UnitConverter.
+        query: короткое имя API или описание сценария.
+        limit: максимум совпадающих строк (1–20).
+        Возвращает путь относительно каталога примеров, номер строки и фрагмент.
+        """
+        if not query.strip():
+            raise ValueError("query не может быть пустым")
+        if not 1 <= limit <= 20:
+            raise ValueError("limit должен быть от 1 до 20")
+        key = ("api_examples_search", query.strip(), project, limit)
+        if budget.is_duplicate_call(key):
+            return duplicate_call()
+        if not budget.allow_tool_call():
+            return tool_limit_reached()
+        try:
+            results = await asyncio.to_thread(
+                search_api_example_sources,
+                query,
+                API_EXAMPLES_ROOT,
+                project,
+                limit,
+            )
+        except FileNotFoundError:
+            return budget.limit_metadata(
+                "Каталог примеров T-FLEX DOCs API не подключён. "
+                "Продолжай исследование по документации."
+            )
+        if not results:
+            return budget.limit_metadata(
+                "В исходниках примеров T-FLEX DOCs API совпадений нет. "
+                "Продолжай поиск по документации."
+            )
+        lines = [f"{path}:{line_no}: {line}" for path, line_no, line in results]
+        return budget.limit_metadata(
+            "Совпадения в примерах (не замена документации):\n" + "\n".join(lines)
+        )
+
+    @agent.tool_plain
+    async def read_api_example(
+        path: str, start_line: int = 1, line_limit: int = 80
+    ) -> str:
+        """Чтение ограниченного фрагмента C# исходника из примера.
+
+        path: путь из результата search_api_examples.
+        start_line: первая строка (начиная с 1).
+        line_limit: число строк (1–120).
+        """
+        if not path.strip():
+            raise ValueError("path не может быть пустым")
+        key = ("api_example_read", path, start_line, line_limit)
+        if budget.is_duplicate_call(key):
+            return duplicate_call()
+        if not budget.allow_tool_call():
+            return tool_limit_reached()
+        try:
+            text, first, last, total = await asyncio.to_thread(
+                read_api_example_source,
+                path,
+                API_EXAMPLES_ROOT,
+                start_line,
+                line_limit,
+            )
+        except FileNotFoundError:
+            return budget.limit_metadata(
+                f"Исходник примера не найден: {path}. "
+                "Продолжай проверку по документации."
+            )
+        return budget.limit_metadata(
+            f"{path}, строки {first}–{last} из {total} "
+            "(пример, сверяй API с документацией):\n{text}",
             reserve_tokens=budget.read_token_limit + 512,
         )
 
@@ -936,6 +1080,8 @@ async def run_pipeline(
             f"- {subagent.name}: {subagent.description}"
             for subagent in admin_config.subagents
         )
+        + "\n\n"
+        + API_EXAMPLES_INSTRUCTIONS
     )
     critic_instructions = admin_config.prompts.critic
     writer_instructions = admin_config.prompts.writer
@@ -980,7 +1126,11 @@ async def run_pipeline(
         subagent = Agent(
             _build_model(settings.model, settings),
             name=subagent_config.name,
-            instructions=subagent_config.instructions,
+            instructions=(
+                subagent_config.instructions
+                + "\n\n"
+                + API_EXAMPLES_INSTRUCTIONS
+            ),
             model_settings=model_settings,
             capabilities=capabilities,
             retries=2,

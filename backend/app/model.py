@@ -205,7 +205,7 @@ class AdminSubAgent(BaseModel):
 
 class AgentAdminConfig(BaseModel):
     prompts: AdminPrompts
-    subagents: list[AdminSubAgent] = Field(min_length=1, max_length=32)
+    subagents: list[AdminSubAgent] = Field(min_length=1, max_length=36)
 
     @field_validator("subagents")
     @classmethod

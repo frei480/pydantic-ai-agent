@@ -12,6 +12,8 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       # Документация
       DOCS_ROOT: /app/docs
+      # Установленные примеры T-FLEX DOCs API
+      API_EXAMPLES_ROOT: /app/api-examples
       # Ограничения контекстного окна
       CONTEXT_TOKEN_LIMIT: ${CONTEXT_TOKEN_LIMIT:-120000}
       READ_TOKEN_BUDGET: ${READ_TOKEN_BUDGET:-20000}
@@ -21,6 +23,13 @@ services:
     volumes:
       # Документация только для чтения
       - ./docs:/app/docs:ro
+      # Примеры API доступны агенту только для чтения
+      - type: bind
+        source: ${DOCS_API_EXAMPLES_PATH:-./api-examples}
+        target: /app/api-examples
+        read_only: true
+        bind:
+          create_host_path: false
       # БД чатов сохраняется между перезапусками
       - sqlite-data:/app/data
     healthcheck:

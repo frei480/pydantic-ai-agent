@@ -16,6 +16,27 @@ _SKILL_FRONTMATTER = re.compile(
     r"\A---\r?\n(?P<header>.*?)\r?\n---(?:\r?\n|\Z)",
     re.DOTALL,
 )
+_LEGACY_DEFAULT_SUBAGENTS = frozenset(
+    {
+        "tflex_docs_researcher",
+        "tflex_cad_document_researcher",
+        "tflex_cad_2d_researcher",
+        "tflex_cad_3d_researcher",
+    }
+)
+_LEGACY_BUNDLED_SKILLS = frozenset(
+    {
+        "tflex-cad-2d-modeling",
+        "tflex-cad-3d-modeling",
+        "tflex-cad-document-workflow",
+        "tflex-cad-object-model-map",
+        "tflex-docs-macro-language",
+        "tflex-docs-open-api-map",
+        "tflex-docs-reference-object-editing",
+        "tflex-docs-server-file-import",
+    }
+)
+_CONTENT_MIGRATION_MARKER = ".api-examples-content-v1"
 
 
 class AdminContentStore:
@@ -30,12 +51,34 @@ class AdminContentStore:
     ) -> AgentAdminConfig:
         with self._lock:
             self.data_dir.mkdir(parents=True, exist_ok=True)
+            migration_marker = self.data_dir / _CONTENT_MIGRATION_MARKER
+            bundled_marker = self.data_dir / ".bundled-skills-copied"
             if self.config_path.exists():
                 config = AgentAdminConfig.model_validate_json(
                     self.config_path.read_text(encoding="utf-8")
                 )
+                if not migration_marker.exists():
+                    configured_names = {
+                        subagent.name for subagent in config.subagents
+                    }
+                    missing_subagents = [
+                        subagent.model_copy(deep=True)
+                        for subagent in defaults.subagents
+                        if subagent.name not in configured_names
+                        and subagent.name not in _LEGACY_DEFAULT_SUBAGENTS
+                    ]
+                    if missing_subagents:
+                        config.subagents.extend(missing_subagents)
+                        self._write_atomic(
+                            self.config_path,
+                            json.dumps(
+                                config.model_dump(mode="json"),
+                                ensure_ascii=False,
+                                indent=2,
+                            ),
+                        )
             else:
-                config = defaults
+                config = defaults.model_copy(deep=True)
                 self._write_atomic(
                     self.config_path,
                     json.dumps(config.model_dump(mode="json"), ensure_ascii=False, indent=2),
@@ -44,13 +87,19 @@ class AdminContentStore:
             self.skills_root.mkdir(parents=True, exist_ok=True)
             if self.skills_root.is_symlink():
                 raise ValueError("Каталог навыков не может быть символической ссылкой")
-            marker = self.data_dir / ".bundled-skills-copied"
-            if not marker.exists():
-                for bundled_skill in bundled_skills_root.iterdir():
-                    target = self.skills_root / bundled_skill.name
-                    if not target.exists():
-                        shutil.copytree(bundled_skill, target)
-                self._write_atomic(marker, "initialized\n")
+            for bundled_skill in bundled_skills_root.iterdir():
+                if bundled_marker.exists() and (
+                    migration_marker.exists()
+                    or bundled_skill.name in _LEGACY_BUNDLED_SKILLS
+                ):
+                    continue
+                target = self.skills_root / bundled_skill.name
+                if not target.exists():
+                    shutil.copytree(bundled_skill, target)
+            if not bundled_marker.exists():
+                self._write_atomic(bundled_marker, "initialized\n")
+            if not migration_marker.exists():
+                self._write_atomic(migration_marker, "api-examples-content-v1\n")
             return config
 
     def save_config(self, config: AgentAdminConfig) -> None:

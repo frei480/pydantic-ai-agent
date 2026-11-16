@@ -2,6 +2,9 @@ import os
 from pathlib import Path
 
 DOCS_ROOT = Path(os.getenv("DOCS_ROOT", "/app/docs")).resolve()
+API_EXAMPLES_ROOT = Path(
+    os.getenv("API_EXAMPLES_ROOT", "/app/api-examples")
+).resolve()
 DB_PATH = Path(os.getenv("DB_PATH", "/app/data/chats.db"))
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 
