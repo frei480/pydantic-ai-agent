@@ -58,6 +58,7 @@ from .doc_catalog import (
     search_doc_topics as search_index_topics,
 )
 from .llm_errors import capture_llm_requests
+from .llm_messages import merge_system_messages_in_requests
 from .api_examples import read_api_example as read_api_example_source
 from .api_examples import search_api_examples as search_api_example_sources
 from .doc_tools import (
@@ -523,6 +524,11 @@ class _RetryTransientErrorsAsyncOpenAI(AsyncOpenAI):
         # asynccopy строит клоны with_options через self.__class__(...),
         # поэтому перехват включается и на клонах
         capture_llm_requests(self)
+        # склейка system-сообщений в одно ведущее: строгие chat-шаблоны
+        # (Qwen 3.x) отвечают 500 «System message must be at the beginning».
+        # Порядок важен: склейка снаружи логирования, поэтому в снимке
+        # последнего запроса оказывается ровно то тело, что уйдёт провайдеру.
+        merge_system_messages_in_requests(self)
 
     def _should_retry(self, response: Response) -> bool:
         if response.status_code == 429:
