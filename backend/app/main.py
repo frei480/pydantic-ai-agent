@@ -14,7 +14,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from openai import APIError
 
-from . import agent, db
+from . import agent, db, llm_errors
 from .admin_content import AdminContentStore, skill_metadata
 from .config import (
     ADMIN_PASSWORD,
@@ -440,7 +440,7 @@ async def model_health() -> ModelHealthOut:
         try:
             responds = await agent.probe_model()
         except APIError as exc:
-            logger.warning("Model health probe failed: %s", exc)
+            llm_errors.log_llm_failure(exc, context={"endpoint": "/api/health/model"})
             result: ModelHealthOut = {
                 "status": "error",
                 "model": settings.model,
@@ -512,6 +512,8 @@ async def post_message(chat_id: int, body: MessageIn) -> StreamingResponse:
         yield _sse({"type": "start", "chat": _chat_out(chat)})
         final_text = ""
         history_json = chat.get("history_json", "")
+        # последняя фаза пайплайна — попадает в контекст записи об ошибке LLM
+        current_phase = ""
         try:
             async for event in agent.run_pipeline(content, history_json):
                 if event["type"] == "final":
@@ -522,8 +524,14 @@ async def post_message(chat_id: int, body: MessageIn) -> StreamingResponse:
                     final_text = text
                     history_json = history
                     continue
+                if event["type"] == "phase":
+                    current_phase = str(event.get("phase", ""))
                 yield _sse(event)
         except Exception as exc:  # noqa: BLE001 — наружу клиенту только краткость
+            # полный дамп ошибки и последнего запроса — в файл лога, клиенту — краткость
+            llm_errors.log_llm_failure(
+                exc, context={"chat_id": chat_id, "phase": current_phase}
+            )
             yield _sse({"type": "error", "message": _provider_error_message(exc)})
             return
         if final_text:

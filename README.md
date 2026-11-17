@@ -170,6 +170,8 @@ API-ключ не возвращается браузеру, но хранитс
 ```ini
 AI_MODEL=openai:gpt-4o-mini
 OPENAI_API_KEY=sk-...
+# Полный лог ошибок LLM (трейсбек + последний запрос к модели):
+LLM_ERROR_LOG_PATH=./data/llm-errors.log
 # Повторы временных ошибок провайдера (502/503/504 и т.п.):
 OPENAI_MAX_RETRIES=5
 # Максимум запросов к модели за один запуск агента (по умолчанию 100):
@@ -207,6 +209,7 @@ npm run dev
 ```bash
 python -X utf8 tests/test_e2e_mock.py     # пайплайн агентов
 python -X utf8 tests/test_http_sse.py     # FastAPI + SSE + SQLite
+python -X utf8 tests/test_llm_error_e2e.py     # полный дамп ошибки LLM в лог-файл
 ```
 
 ## Структура

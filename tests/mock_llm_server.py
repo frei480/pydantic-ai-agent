@@ -99,6 +99,24 @@ class Handler(BaseHTTPRequestHandler):
         streaming = bool(body.get("stream")) or "text/event-stream" in self.headers.get(
             "Accept", ""
         )
+        # MOCK_FAIL_ALL=1 — каждый вызов модели падает с 502 (для e2e-теста лога ошибок LLM).
+        if self.path.endswith("/chat/completions") and os.getenv("MOCK_FAIL_ALL") == "1":
+            payload = json.dumps(
+                {
+                    "error": {
+                        "message": "MOCK-FAIL-ALL-MARKER",
+                        "type": "provider_unavailable",
+                        "code": 502,
+                    }
+                }
+            ).encode()
+            self.send_response(502)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Retry-After-Ms", "1")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         if self.path.endswith("/chat/completions") and any(
             message.get("content") == "Reply with exactly: HEALTH_OK"
             for message in body.get("messages", [])
