@@ -70,10 +70,10 @@ try:
                 out = server.stdout.read().decode(errors="replace") if server.stdout else ""
                 raise RuntimeError(f"server died:\n{out}")
     else:
-        raise RuntimeError(
-            f"server did not start (poll={server.poll()})\n"
-            + (server.stdout.read().decode(errors="replace") if server.stdout else "")
-        )
+        if server.poll() is not None:
+            out = server.stdout.read().decode(errors="replace") if server.stdout else ""
+            raise RuntimeError(f"server did not start:\n{out}")
+        raise RuntimeError("server did not start: процесс сервера ещё работает (таймаут ожидания)")
 
     req = urllib.request.Request(
         f"{base_url}/api/chats",

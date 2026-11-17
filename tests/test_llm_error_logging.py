@@ -153,6 +153,81 @@ async def check_client_capture():
 
 asyncio.run(check_client_capture())
 
+
+# 8) зависший (in-flight) запрос: снимок доступен, пока вызов ещё не завершился
+async def check_inflight():
+    seen = {}
+
+    async def _hanging_create(**kwargs):
+        # мы внутри вызова: снимок должен вернуться даже с крошечным лимитом
+        # возраста — in-flight запись не проверяется по возрасту
+        seen["small_age"] = llm_errors.last_request_snapshot(max_age_seconds=0.001)
+        seen["zero_age"] = llm_errors.last_request_snapshot(max_age_seconds=0.0)
+        raise RuntimeError("имитация зависшего вызова")
+
+    fake = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=_hanging_create)))
+    llm_errors.capture_llm_requests(fake)
+    # предыстория: устаревшая завершённая запись (старше 600 c) не должна
+    # маскировать in-flight — именно она и была бы отброшена проверкой возраста
+    with llm_errors._snapshot_lock:
+        llm_errors._last_request = {"captured_at": time.time() - 601, "kwargs": {"model": "m-old"}}
+    try:
+        await fake.chat.completions.create(model="m-hang", messages=[{"role": "user", "content": "x"}])
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("ожидался RuntimeError от стаба")
+    for key in ("small_age", "zero_age"):
+        snap = seen[key]
+        assert snap is not None, f"in-flight снимок не вернулся ({key})"
+        assert snap["kwargs"]["model"] == "m-hang", f"неожиданный снимок ({key}): {snap['kwargs']}"
+    # после завершения (успех или сбой) слот in-flight очищен: устареваем
+    # завершённую запись и проверяем, что с крошечным лимитом снимка нет —
+    # неочищенный in-flight вернул бы запись независимо от возраста
+    with llm_errors._snapshot_lock:
+        llm_errors._last_request["captured_at"] = time.time() - 601
+    assert llm_errors.last_request_snapshot(max_age_seconds=0.001) is None
+    # а с обычным лимитом завершённая запись по-прежнему доступна
+    assert llm_errors.last_request_snapshot(max_age_seconds=700.0)["kwargs"]["model"] == "m-hang"
+
+
+asyncio.run(check_inflight())
+
+
+# 9) внешний предохранитель log_llm_failure: сбой рендеринга не рвёт вызывающий код
+class _CaptureHandler(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.messages = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
+capture = _CaptureHandler()
+fallback_logger = logging.getLogger("app.llm_errors.file")
+orig_render = llm_errors.render_failure_record
+orig_fallback_level = fallback_logger.level
+
+
+def _boom(*args, **kwargs):
+    raise RuntimeError("поломанный рендер")
+
+
+llm_errors.render_failure_record = _boom
+fallback_logger.addHandler(capture)
+fallback_logger.setLevel(logging.ERROR)
+try:
+    llm_errors.log_llm_failure(exc, context={"chat_id": 1})  # не должно бросить
+finally:
+    llm_errors.render_failure_record = orig_render
+    fallback_logger.removeHandler(capture)
+    fallback_logger.setLevel(orig_fallback_level)
+
+assert any("сбой записи полной ошибки" in message for message in capture.messages), capture.messages
+# в последней надежде указан тип исходного исключения и оно само
+assert "APIStatusError" in " ".join(capture.messages) and "quota" in " ".join(capture.messages)
+
 print("LLM-CAPTURE-OK")
 
 print("LLM-ERRORS-OK")

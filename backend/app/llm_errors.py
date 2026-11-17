@@ -42,6 +42,10 @@ _ROTATE_BACKUP_COUNT = 5
 # поэтому доступ — под блокировкой.
 _snapshot_lock = threading.Lock()
 _last_request: dict[str, Any] | None = None
+# Запрос, который ещё выполняется: (kwargs, started_at). Логирование сбоя может
+# случиться, пока вызов ещё в полёте (таймаут/зависание), — тогда завершённых
+# записей может не быть или они устарели, а сбойный запрос — именно этот.
+_in_flight: tuple[dict[str, Any], float] | None = None
 
 # Состояние файлового хендлера: создаётся один раз на путь; при ошибке открытия
 # путь запоминается, чтобы не пытаться снова, пока путь не сменят.
@@ -63,8 +67,15 @@ def capture_llm_requests(client: Any) -> None:
 
     @functools.wraps(inner)
     async def _create(**kwargs: Any) -> Any:
+        global _in_flight
         record_llm_request(kwargs)
-        return await inner(**kwargs)
+        with _snapshot_lock:
+            _in_flight = (dict(kwargs), time.time())
+        try:
+            return await inner(**kwargs)
+        finally:
+            with _snapshot_lock:
+                _in_flight = None
 
     client.chat.completions.create = _create
 
@@ -78,8 +89,15 @@ def record_llm_request(kwargs: Mapping[str, Any]) -> None:
 
 
 def last_request_snapshot(max_age_seconds: float = 600.0) -> dict[str, Any] | None:
-    """Вернуть `{"captured_at", "kwargs"}` или None, если записи нет или она старше лимита."""
+    """Вернуть `{"captured_at", "kwargs"}` или None, если записи нет или она старше лимита.
+
+    Запрос, который ещё выполняется, имеет приоритет без проверки возраста:
+    если сбой логируется, пока вызов в полёте, сбойный запрос — именно он.
+    """
     with _snapshot_lock:
+        if _in_flight is not None:
+            kwargs, started_at = _in_flight
+            return {"captured_at": started_at, "kwargs": dict(kwargs)}
         if _last_request is None:
             return None
         if time.time() - _last_request["captured_at"] > max_age_seconds:
@@ -195,11 +213,22 @@ def _ensure_file_handler() -> RotatingFileHandler | None:
 def log_llm_failure(exc: BaseException, *, context: dict[str, Any] | None = None) -> None:
     """Записать полную ошибку LLM в ротируемый файл и в обычный лог.
 
-    Берёт снимок последнего запроса сама; сбой открытия файла не мешает
-    вызывающему коду — запись уходит в обычный лог (в обрезанном виде).
+    Берёт снимок последнего запроса сама; любой внутренний сбой (открытие
+    файла, рендеринг записи) не мешает вызывающему коду — наружу исключение
+    не выходит, вместо полной записи уходит последняя надежда в обычный лог.
     """
-    record = render_failure_record(exc, context, last_request_snapshot())
-    if _ensure_file_handler() is not None:
-        _logger.error("%s", record)
-    else:
-        _fallback_logger.error("%s", _truncate_bytes(record, _ATTR_TEXT_LIMIT))
+    try:
+        record = render_failure_record(exc, context, last_request_snapshot())
+        if _ensure_file_handler() is not None:
+            _logger.error("%s", record)
+        else:
+            _fallback_logger.error("%s", _truncate_bytes(record, _ATTR_TEXT_LIMIT))
+    except Exception:  # noqa: BLE001 — защита последнего рубежа
+        try:
+            _fallback_logger.error(
+                "llm_errors: сбой записи полной ошибки: %s\n%s",
+                type(exc).__name__,
+                exc,
+            )
+        except Exception:
+            pass
