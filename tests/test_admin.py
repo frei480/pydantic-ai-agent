@@ -30,6 +30,8 @@ def check_admin_content_migration() -> None:
             "tflex-docs-test-data-generation",
             "tflex-docs-unit-conversion",
             "tflex-docs-plugin-ui-extensions",
+            "tflex-docs-parameters",
+            "tflex-docs-stages-signatures",
         }
         for skill_id in new_skill_ids:
             skill_directory = store.skills_root / skill_id
@@ -44,6 +46,7 @@ def check_admin_content_migration() -> None:
             "tflex_docs_test_data_generator",
             "tflex_docs_units_researcher",
             "tflex_docs_plugin_ui_researcher",
+            "tflex_docs_events_researcher",
         }.issubset({subagent.name for subagent in migrated.subagents})
         assert new_skill_ids.issubset(
             {skill["name"] for skill in store.list_skills()}
@@ -78,7 +81,7 @@ async def check_admin_endpoints() -> None:
             agent.default_agent_admin_config(),
             Path("backend/app/skills").resolve(),
         )
-        assert len(store.list_skills()) == 12
+        assert len(store.list_skills()) == 17
         agent.configure_agent_admin_content(initial_config, store.skills_root)
         main.admin_content = store
         main._admin_login_failures.clear()
