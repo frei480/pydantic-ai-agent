@@ -6,6 +6,10 @@ API_EXAMPLES_ROOT = Path(
     os.getenv("API_EXAMPLES_ROOT", "/app/api-examples")
 ).resolve()
 DB_PATH = Path(os.getenv("DB_PATH", "/app/data/chats.db"))
+# Полный лог ошибок LLM (рядом с базой); отключаемая через env подмена пути.
+LLM_ERROR_LOG_PATH = Path(
+    os.getenv("LLM_ERROR_LOG_PATH") or (DB_PATH.parent / "llm-errors.log")
+)
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 
 # --- модель ---
