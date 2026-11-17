@@ -7,6 +7,12 @@ description: Use as a navigation map for T-FLEX DOCs Open API questions about se
 
 Use this map to choose what to investigate in the T-FLEX DOCs API documentation. It summarizes the object groups and relationships in the `T-FLEX DOCs Open API — диаграмма объектов` diagram. It is a navigation aid, not an API specification.
 
+This skill ships one reference data file next to this guide:
+
+- `/skills/tflex-docs-open-api-map/references/diagram-relations.md` — the full relation map extracted from the Open API diagram: every relation between the object groups below with the members (methods and properties) exposed on each side of the relation, and the documentation page describing that relation. Read it when you need to know which members navigate a specific relation.
+
+If the workspace tool cannot read this file, fall back to `search_docs` / `read_file` over the documentation instead of guessing relations.
+
 ## Object groups
 
 - **Server connection:** `ServerConnection`, `ConnectionParameters`, `ClientView`, `SystemReferences`.
@@ -28,6 +34,6 @@ Use this map to choose what to investigate in the T-FLEX DOCs API documentation.
 ## Research workflow
 
 1. Use this map to identify likely neighboring types and search terms. Keep T-FLEX DOCs separate from T-FLEX CAD.
-2. Search the T-FLEX DOCs documentation for the exact target type and relevant neighbors. Locate and read the diagram's Markdown companion if more context about the map is needed.
+2. Search the T-FLEX DOCs documentation for the exact target type and relevant neighbors. Consult `references/diagram-relations.md` for the members exposed on each relation, and locate and read the diagram's Markdown companion if more context about the map is needed.
 3. Read the profile documentation and examples for every member, constructor, and operation used in an answer. Do not infer direction, cardinality, ownership, or method signatures from this map alone.
 4. Cite the documentation source and line numbers for verified facts. If the documentation does not establish a relationship or signature, report that uncertainty instead of guessing.

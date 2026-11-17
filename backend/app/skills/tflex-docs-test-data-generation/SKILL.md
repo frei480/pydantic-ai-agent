@@ -9,6 +9,48 @@ The `ReferenceObjectsGenerator` sample demonstrates a generator for reference
 objects and related data. Treat its source as a scenario example, not a normative
 contract.
 
+## Verified example shapes
+
+Working sequences from `ReferenceObjectsGenerator/ReferenceObjectsGenerator.cs` (catalog «Примеры использования API»; fetch with `read_api_example`):
+
+```csharp
+// Precondition and parent-aware creation (:175, :188):
+if (!reference.CanCreateReferenceObject(null, parentObject, classObject))
+    return null;
+ReferenceObject newObject = reference.CreateReferenceObject(parentObject, classObject);
+
+// Edit lifecycle with guard and rollback (:195-215):
+if (!newObject.Changing)
+    newObject.BeginChanges();
+try
+{
+    // fill parameters, links...
+    newObject.EndChanges();
+}
+catch
+{
+    newObject.CancelChanges();
+    return null;
+}
+
+// Fill parameters (:286-297):
+foreach (var parameter in changingObject.ParameterValues)
+{
+    if (parameter.IsReadOnly)
+        continue;
+    parameter.Value = GenerateValueByType(parameter.ParameterInfo.Type, length)
+                      ?? parameter.ParameterInfo.DefaultValue;
+}
+
+// Load existing objects of a reference (:107-112):
+_fileReference = new FileReference(Connection);
+_fileReference.Objects.Load();
+if (_fileReference.Objects.CountLoaded > 0)
+    parent = _fileReference.Objects[0];
+```
+
+Hierarchy choice uses `reference.ParameterGroup.HasHierarchy` (:75); generation checks `_token.IsCancellationRequested` between objects (:89, :145); the value generator switches on `ParameterType.Id` (:306-385).
+
 1. Confirm the target product/version and whether the data is disposable test
    data or production data.
 2. Search `search_api_examples` for `CanCreateReferenceObject`,

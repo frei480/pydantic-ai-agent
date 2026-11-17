@@ -39,6 +39,38 @@ Search exact Russian command names and API member names from the topic pages, th
 
 ## 3. Preserve object edit and save semantics
 
+Common simplified-macro commands, verified against the documentation pages «Объекты справочника» (`TFlexDOCs API/458f2560-c2d9-4615-ae01-fe575141692d.md`) and «Поиск объектов» (`TFlexDOCs API/7B18164A-A27B-4EBB-B594-0FF284FD9695.md`):
+
+| Command | Purpose |
+|---|---|
+| `ТекущийОбъект` | The current object of the macro context. |
+| `ВыбранныеОбъекты` | Objects selected in the reference or UI control. |
+| `СоздатьОбъект("имя справочника")` | Create an object in the given reference. |
+| `СоздатьОбъект("имя справочника", "имя типа объекта")` | Create an object of the given type. |
+| `СоздатьОбъект("имя справочника", "имя типа объекта", родительский объект)` | Create an object of the given type under the given parent object. |
+| `Объект.Изменить()` | Enter edit state for an existing object; this removes its signatures — use `ИзменитьСохранивПодписи()` to keep them. |
+| `Объект.Сохранить()` | Save the object's changes; `СохранитьВсё` saves all objects registered in the macro. |
+| `Объект.Параметр["имя"]` | Read or write a parameter value. |
+| `НайтиОбъект("имя справочника", "имя параметра", "значение")` | Find one object by parameter value; returns the object or `null`. |
+| `НайтиОбъект("имя справочника", "условие")` | Find one object by condition, for example `"[Наименование] = Договоры"`. |
+| `НайтиОбъекты("имя справочника", "имя параметра", "значение")` | Find a list of objects by parameter value. |
+| `СкопироватьОбъект(прототип[, родительский объект, копировать дочерние объекты, копировать связанные прототипы])` | Copy an object from a prototype; the result is a set of created objects (target plus linked prototypes). |
+| `ТекущийОбъект.ИзменитьСтадию("имя стадии", "комментарий")` | Change the current object's stage. |
+
+Verified examples from the documentation:
+
+```csharp
+Объект новыйДоговор = СоздатьОбъект("Договоры", "Договор", родительскийОбъект);
+новыйДоговор.Параметр["Наименование"] = "Договор №" + новыйДоговор.Параметр["Номер"];
+новыйДоговор.Сохранить();
+
+Объект файл = НайтиОбъект("Файлы", "Наименование", "Мой документ.pdf");
+if (файл is not null)
+    ТекущийОбъект.СвязанныйОбъект["Файл"] = файл;
+```
+
+Commands have Russian names and are not C#: simplified macros do not support classes, external libraries, LINQ, or exceptions. Confirm a command not listed here on its documentation page (`Макроязык`, `Макроязык/Параметры`, `Макроязык/Поиск объектов`, `Макроязык/Копирование объектов`, `Макроязык/Иерархия`) instead of inventing it.
+
 For simplified macro-language object changes:
 
 1. Determine whether the object is new or existing. Newly created objects may already be in edit state; do not call `Изменить()` automatically.

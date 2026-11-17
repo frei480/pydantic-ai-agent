@@ -10,8 +10,27 @@ Use this workflow when the requested task combines server connection with import
 ## 1. Choose the connection context
 
 - **Macro:** investigate obtaining `ServerConnection` from the macro context (`Context.Connection`). Do not open a second connection unless the task specifically requires one.
-- **External application:** investigate `ServerConnection.Open(...)`. The source example uses the server login authentication overload, GRPC communication mode, and default serialization/compression settings.
+- **External application:** investigate `ServerConnection.Open(...)`. The documentation's example uses the server-login overload shown below; the installed ImportReference example instead starts with the parameterless `ServerConnection.Open()` overload (current login or connection dialog). The connection context also provides `ClientView.GetUser()` returning `User`, `ReferenceCatalog.Find(string)` returning `ReferenceInfo` (accepts a name, Guid, or XmlId), and `WorkingFolder` / `SetWorkingFolder(string path)`.
 - Keep code for these two contexts separate. Do not mix macro-only types such as `MacroProvider` and `MacroContext` into an external application's `Main`.
+
+Verified connection shape from the documentation example (`TFlexDOCs API/590BF971-0256-450B-8D9D-46C870673B97.md`, «Соединение с сервером из внешнего приложения»):
+
+```csharp
+using var serverConnection = ServerConnection.Open("Администратор", // Логин
+    String.Empty, // Пароль (параметр типа MD5HashString; в примере передаётся строкой)
+    "localhost",  // Сервер
+    null,         // Конфигурация (Guid?)
+    CommunicationMode.GRPC,
+    DataFormatterSettings.DefaultDataSerializerAlgorithm,
+    DataFormatterSettings.DefaultCompressionAlgorithm);
+
+if (serverConnection?.IsConnected != true)
+{
+    // подключение к серверу отсутствует
+}
+```
+
+The verified overload signature (`TFlexDOCs API/F493B1CF.md`): `public static ServerConnection Open(string userName, MD5HashString password, string server, Guid? configurationGuid, CommunicationMode communication, DataSerializerAlgorithm dataSerializer, CompressionAlgorithm compression, IWebProxy proxy = null)`; `CommunicationMode.GRPC` is a documented enum member.
 
 ## 2. Establish connection and failure handling
 

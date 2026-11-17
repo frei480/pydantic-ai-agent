@@ -17,6 +17,45 @@ Use this workflow for changes to existing T-FLEX DOCs reference objects. The ove
 
 The source example demonstrates parameter access through the object's indexer and typed getters, `SetLinkedObject` for single-object links, and `AddLinkedObject` / `RemoveLinkedObject` for collection links. Confirm the link cardinality and API signatures before choosing an operation. Do not treat `GetObject` and `GetObjects` as interchangeable.
 
+## Verified example shapes
+
+Lifecycle and link operations from `ReferenceObjectsGenerator/ReferenceObjectsGenerator.cs` (catalog «Примеры использования API»; fetch with `read_api_example`):
+
+```csharp
+// Creation precondition and parent-aware creation (:175, :188):
+if (!reference.CanCreateReferenceObject(null, parentObject, classObject))
+    return null;
+ReferenceObject newObject = reference.CreateReferenceObject(parentObject, classObject);
+
+// Edit lifecycle with guard and rollback (:195-215):
+if (!newObject.Changing)
+    newObject.BeginChanges();
+try
+{
+    // parameter and link changes...
+    newObject.EndChanges();
+}
+catch
+{
+    newObject.CancelChanges();
+}
+
+// Single-object (1:1 / N:1) links (:242-252):
+foreach (var group in changingObject.Links.ToOne.LinkGroups)
+{
+    var linkedReference = group.SlaveGroup.ReferenceInfo.CreateReference();
+    linkedReference.Objects.Load();
+    changingObject.Links.ToOne[group].SetLinkedObject(linkedObject);
+}
+
+// Collection (1:N / N:N) links (:258-275); table links are skipped via
+// group.IsTableOneToMany (:262):
+OneToManyLink link = (OneToManyLink)changingObject.Links.ToMany[group];
+link.AddLinkedObject(linkedObject);
+```
+
+`reference.IsSlave` gates link filling in the sample (:206-209); `RemoveLinkedObject` and `ClearLinks` are not exercised there — verify them in the documentation.
+
 ## Changing an object's type
 
 The documented type-change overload of `BeginChanges(newType)` returns the object with the new type. Continue all edits and finish the change using that returned object, not the original reference. Check for a failed cast or missing type metadata before dereferencing it.
