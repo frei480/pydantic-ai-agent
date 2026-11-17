@@ -57,6 +57,7 @@ from .doc_catalog import (
     search_indexed_pages as search_indexed_doc_pages,
     search_doc_topics as search_index_topics,
 )
+from .llm_errors import capture_llm_requests
 from .api_examples import read_api_example as read_api_example_source
 from .api_examples import search_api_examples as search_api_example_sources
 from .doc_tools import (
@@ -451,6 +452,13 @@ def _build_model(name: str, settings: ModelSettings | None = None) -> OpenAIChat
 
 
 class _RetryTransientErrorsAsyncOpenAI(AsyncOpenAI):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # фиксируем kwargs каждого вызова create (для лога ошибок LLM);
+        # asynccopy строит клоны with_options через self.__class__(...),
+        # поэтому перехват включается и на клонах
+        capture_llm_requests(self)
+
     def _should_retry(self, response: Response) -> bool:
         if response.status_code == 429:
             return response.headers.get("x-should-retry") == "true"

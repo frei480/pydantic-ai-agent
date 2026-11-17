@@ -106,4 +106,53 @@ try:
 finally:
     llm_errors.LLM_ERROR_LOG_PATH = orig_path
 
+# 7) перехват запросов реального клиента _RetryTransientErrorsAsyncOpenAI
+async def check_client_capture():
+    from openai import APIConnectionError
+
+    from app.agent import _RetryTransientErrorsAsyncOpenAI
+
+    client = _RetryTransientErrorsAsyncOpenAI(
+        api_key="k", base_url="http://127.0.0.1:1/v1", max_retries=0
+    )
+    try:
+        try:
+            await client.chat.completions.create(
+                model="probe-m", messages=[{"role": "user", "content": "x"}], max_tokens=1
+            )
+        except APIConnectionError:
+            pass  # порт 1 закрыт — ожидаемый отказ
+        else:
+            raise AssertionError("ожидался APIConnectionError")
+        snap = llm_errors.last_request_snapshot()
+        assert snap is not None, "запрос основного клиента не зафиксирован"
+        assert snap["kwargs"]["model"] == "probe-m", (
+            f"клиент не зафиксировал свой запрос, в снапшоте model={snap['kwargs'].get('model')!r}"
+        )
+
+        # клон через with_options тоже фиксирует запросы
+        clone = client.with_options(max_retries=0)
+        try:
+            await clone.chat.completions.create(
+                model="probe-clone", messages=[{"role": "user", "content": "y"}], max_tokens=1
+            )
+        except APIConnectionError:
+            pass
+        else:
+            raise AssertionError("ожидался APIConnectionError от клона")
+        snap_clone = llm_errors.last_request_snapshot()
+        assert snap_clone is not None, "запрос клона не зафиксирован"
+        assert snap_clone["kwargs"]["model"] == "probe-clone", (
+            f"клон не зафиксировал свой запрос, в снапшоте model={snap_clone['kwargs'].get('model')!r}"
+        )
+
+        await clone.close()
+    finally:
+        await client.close()
+
+
+asyncio.run(check_client_capture())
+
+print("LLM-CAPTURE-OK")
+
 print("LLM-ERRORS-OK")
