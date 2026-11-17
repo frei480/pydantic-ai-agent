@@ -228,6 +228,35 @@ assert any("сбой записи полной ошибки" in message for mess
 # в последней надежде указан тип исходного исключения и оно само
 assert "APIStatusError" in " ".join(capture.messages) and "quota" in " ".join(capture.messages)
 
+
+# 10) «завис и упал» после 600+ c: при выходе с исключением метка завершённой
+# записи обновляется — снимок упавшего запроса не отбрасывается возрастом
+async def check_hang_then_fail():
+    async def _failing_create(**kwargs):
+        raise RuntimeError("падение после долгого зависания")
+
+    fake = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=_failing_create)))
+    llm_errors.capture_llm_requests(fake)
+    # предыстория: заведомо устаревшая запись — без обновления метки на выходе
+    # с исключением снимок упавшего запроса был бы отброшен проверкой возраста
+    with llm_errors._snapshot_lock:
+        llm_errors._last_request = {"captured_at": time.time() - 9999, "kwargs": {"model": "stale"}}
+    try:
+        await fake.chat.completions.create(model="m-fail", messages=[{"role": "user", "content": "y"}])
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("ожидался RuntimeError")
+    snap = llm_errors.last_request_snapshot()  # обычный лимит 600 c
+    assert snap is not None, "снимок упавшего запроса отброшен проверкой возраста"
+    assert snap["kwargs"]["model"] == "m-fail", f"вернулся не тот снимок: {snap['kwargs']}"
+    # in-flight слот после завершения очищен (иначе снимок вернулся бы и без обновления)
+    with llm_errors._snapshot_lock:
+        assert llm_errors._in_flight is None
+
+
+asyncio.run(check_hang_then_fail())
+
 print("LLM-CAPTURE-OK")
 
 print("LLM-ERRORS-OK")

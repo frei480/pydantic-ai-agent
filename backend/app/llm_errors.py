@@ -73,6 +73,12 @@ def capture_llm_requests(client: Any) -> None:
             _in_flight = (dict(kwargs), time.time())
         try:
             return await inner(**kwargs)
+        except BaseException:
+            # Зависший вызов завершается позже 600 с: обновляем метку, чтобы
+            # снимок упавшего запроса не отбрасывался проверкой возраста
+            # при логировании.
+            record_llm_request(kwargs)
+            raise
         finally:
             with _snapshot_lock:
                 _in_flight = None
