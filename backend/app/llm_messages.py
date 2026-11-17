@@ -19,7 +19,7 @@ from __future__ import annotations
 import functools
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import Final, Protocol, TypeAlias
+from typing import Final, Protocol
 
 __all__ = [
     "ChatClient",
@@ -34,9 +34,9 @@ logger = logging.getLogger(__name__)
 
 #: Сообщение запроса в формате OpenAI chat: роль, содержимое и служебные
 #: поля (tool_calls, tool_call_id, name и т.п.).
-Message: TypeAlias = Mapping[str, object]
+type Message = Mapping[str, object]
 #: Содержимое сообщения: строка, content-parts или их отсутствие.
-Content: TypeAlias = str | Sequence[Mapping[str, object]] | None
+type Content = str | Sequence[Mapping[str, object]] | None
 
 #: Роли, содержимое которых chat-шаблон трактует как системную инструкцию.
 #: `developer` — новое имя system в API OpenAI; в один блок его тоже склеиваем,
