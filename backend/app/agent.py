@@ -945,8 +945,8 @@ def register_tools(
 # -------------------------------------------------------------------
 
 
-async def _stream_text(
-    node: ModelRequestNode[Any, Any], run: AgentRun[Any, Any]
+async def _stream_text[DepsT, OutputT](
+    node: ModelRequestNode[DepsT, OutputT], run: AgentRun[DepsT, OutputT]
 ) -> AsyncIterator[str]:
     """Дельты текста из узла модельного запроса (pydantic-ai v2)."""
     async with node.stream(run.ctx) as stream:
