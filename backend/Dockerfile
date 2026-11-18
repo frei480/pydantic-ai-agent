@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 FROM python:3.14-slim
 
 # ripgrep используется как инструмент полнотекстового поиска агента.
@@ -13,7 +14,13 @@ RUN dpkg -i /tmp/ripgrep.deb \
 WORKDIR /app
 
 COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+# Зависимости ставятся ТОЛЬКО из вендоренных wheels (backend/wheels) — без
+# доступа в PyPI: развёртывание в изолированной сети. Набор wheels и есть
+# фиксация версий; как обновлять — wheels/README.md. BuildKit bind-mount:
+# папка wheels не попадает в слои образа.
+RUN --mount=type=bind,source=wheels,target=/wheels \
+    pip install --no-cache-dir --no-index --find-links=/wheels \
+    -r /app/requirements.txt
 
 COPY app /app/app
 
