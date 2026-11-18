@@ -1,10 +1,14 @@
 FROM python:3.14-slim
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ripgrep \
-    && rm -rf /var/lib/apt/lists/*
 # ripgrep используется как инструмент полнотекстового поиска агента.
+# Пакет ставится напрямую из .deb, закоммиченного в репозиторий (packages/README.md):
+# сборка образа не ходит в apt-репозитории — развёртывание в изолированной сети.
+# ripgrep 14.1.1-1+b4 (Debian trixie, amd64); зависимости (libc6, libgcc-s1,
+# libpcre2-8-0) уже входят в базовый образ.
 # Bash агенту недоступен: никакая функция shell в приложении не реализована.
+COPY packages/ripgrep_14.1.1-1+b4_amd64.deb /tmp/ripgrep.deb
+RUN dpkg -i /tmp/ripgrep.deb \
+    && rm -f /tmp/ripgrep.deb
 
 WORKDIR /app
 
