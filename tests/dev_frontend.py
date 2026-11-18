@@ -8,12 +8,26 @@ FRONT = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
 BACK = os.environ.get("BACKEND", "http://127.0.0.1:8000")
 
 
+def _should_proxy(path: str) -> bool:
+    """Проксировать на бэкенд API и документацию (те же пути, что nginx в проде).
+
+    /docs — точное совпадение, /docs/ — префикс (/docs/oauth2-redirect).
+    """
+    return (
+        path.startswith("/api/")
+        or path == "/docs"
+        or path.startswith("/docs/")
+        or path == "/redoc"
+        or path == "/openapi.json"
+    )
+
+
 class DevHandler(SimpleHTTPRequestHandler):
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=FRONT, **kw)
 
     def do_GET(self):
-        if self.path.startswith("/api/"):
+        if _should_proxy(self.path):
             self._proxy("GET")
         else:
             super().do_GET()

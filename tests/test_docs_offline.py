@@ -60,3 +60,25 @@ async def check_docs_offline() -> None:
         assert "proxy_pass http://$backend:8000;" in match.group(1), (
             f"локация {location} не проксирует на бэкенд"
         )
+
+
+def check_dev_proxy_paths() -> None:
+    """Dev-сервер фронтенда проксирует документацию на бэкенд, как nginx в проде."""
+    sys.path.insert(0, str(Path(__file__).parent))
+    from dev_frontend import _should_proxy
+
+    for path in (
+        "/api/chat",
+        "/docs",
+        "/docs/oauth2-redirect",
+        "/redoc",
+        "/openapi.json",
+    ):
+        assert _should_proxy(path), f"{path} должен проксироваться"
+    for path in (
+        "/",
+        "/index.html",
+        "/static/docs-assets/js/swagger-ui-bundle.js",
+        "/docsomething",
+    ):
+        assert not _should_proxy(path), f"{path} не должен проксироваться"
