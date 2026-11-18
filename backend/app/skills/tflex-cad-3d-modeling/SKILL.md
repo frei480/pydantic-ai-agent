@@ -21,6 +21,8 @@ Use this workflow for 3D modeling tasks. Class diagrams help locate related type
 
 - 3D nodes are points (the `Node3D` family; subtypes mix `*Node3D` and `*Point` names) and coordinate systems: verify reference geometry and coordinate-system semantics.
 - A point where two 3D paths intersect is `TwoPathesIntersectionPoint` (`PathFirst`/`PathSecond`); `IntersectionNode3D` is for axes, wires, solids, and planes, not paths.
+- Nodes along a helix: there is no helical 3D path type. `Spiral` is a spring operation (`Spiral : Operation`; section `Contour`, `StartRadius`/`EndRadius`, `Step`, `Coils` through `LengthMethod`) that creates body geometry, not a path for nodes. Compute the helix coordinates in code and create a `CoordinateNode3D` per point (constructor takes the `Document`; `X`/`Y`/`Z` are `Parameter` with an implicit conversion from `double`).
+- `OnWirePoint` places a node on an existing `Wire`: its `Path` accepts only a profile, path, or edge, and setting `Path` resets `Offset`/`Param`; position the node with `Param` or `Offset` under `Parameterization`/`Reference`.
 - Profiles, workplanes, and paths: verify required inputs and whether source objects are 2D, 3D, or generated geometry.
 - Extrusion, rotation, sweep, loft, Boolean, and blending: use the matching operation example and inspect its exact API pages.
 - Transformations and fragments: verify source/target coordinate systems, ownership, and whether the operation mutates or creates an object.
