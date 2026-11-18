@@ -11,6 +11,11 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi.openapi.docs import (
+    get_redoc_html,
+    get_swagger_ui_html,
+    get_swagger_ui_oauth2_redirect_html,
+)
 from fastapi.responses import StreamingResponse
 from openai import APIError
 
@@ -88,7 +93,45 @@ async def lifespan(app: FastAPI):
     await dbase.close()
 
 
-app = FastAPI(title="Docs AI Agent", lifespan=lifespan)
+app = FastAPI(
+    title="Docs AI Agent",
+    lifespan=lifespan,
+    # Документация работает в изолированной сети: HTML отдают кастомные
+    # маршруты ниже, статику Swagger UI/ReDoc раздаёт nginx фронтенда
+    # (frontend/public/static/docs-assets). Встроенные маршруты отключены:
+    # они регистрируются раньше кастомных и тянут ассеты с CDN.
+    docs_url=None,
+    redoc_url=None,
+    swagger_ui_oauth2_redirect_url=None,
+)
+
+
+@app.get("/docs", include_in_schema=False)
+async def custom_swagger_ui_html():
+    return get_swagger_ui_html(
+        openapi_url=app.openapi_url,  # type: ignore[arg-type]
+        title=app.title + " - Swagger UI",
+        oauth2_redirect_url="/docs/oauth2-redirect",
+        swagger_js_url="/static/docs-assets/js/swagger-ui-bundle.js",
+        swagger_css_url="/static/docs-assets/css/swagger-ui.css",
+        swagger_favicon_url="/static/docs-assets/favicon-32x32.png",
+    )
+
+
+@app.get("/docs/oauth2-redirect", include_in_schema=False)
+async def swagger_ui_redirect():
+    return get_swagger_ui_oauth2_redirect_html()
+
+
+@app.get("/redoc", include_in_schema=False)
+async def redoc_html():
+    return get_redoc_html(
+        openapi_url=app.openapi_url,  # type: ignore[arg-type]
+        title=app.title + " - ReDoc",
+        redoc_js_url="/static/docs-assets/js/redoc.standalone.js",
+        redoc_favicon_url="/static/docs-assets/favicon-32x32.png",
+        with_google_fonts=False,
+    )
 
 
 def _admin_session_token(expires_at: int) -> str:
