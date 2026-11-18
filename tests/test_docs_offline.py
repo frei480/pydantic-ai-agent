@@ -1,5 +1,6 @@
 """Проверка офлайн-документации: Swagger UI и ReDoc без внешних CDN."""
 
+import re
 import sys
 from pathlib import Path
 
@@ -15,6 +16,15 @@ ASSETS = (
     Path("frontend/public/static/docs-assets/js/redoc.standalone.js"),
     Path("frontend/public/static/docs-assets/css/swagger-ui.css"),
     Path("frontend/public/static/docs-assets/favicon-32x32.png"),
+)
+
+# Локации nginx, которые обязаны проксировать документацию на бэкенд.
+# /docs — точное совпадение, /docs/ — префикс (oauth2-redirect).
+PROXY_LOCATIONS = (
+    "location = /docs",
+    "location /docs/",
+    "location /redoc",
+    "location = /openapi.json",
 )
 
 
@@ -42,5 +52,11 @@ async def check_docs_offline() -> None:
         assert asset.is_file(), f"нет ассета {asset}"
 
     nginx = Path("frontend/nginx.conf").read_text(encoding="utf-8")
-    for location in ("location /docs", "location /redoc", "location = /openapi.json"):
-        assert location in nginx, f"в nginx.conf нет локации {location}"
+    for location in PROXY_LOCATIONS:
+        match = re.search(
+            re.escape(location) + r"\s*\{([^}]*)\}", nginx, flags=re.DOTALL
+        )
+        assert match is not None, f"в nginx.conf нет локации {location}"
+        assert "proxy_pass http://$backend:8000;" in match.group(1), (
+            f"локация {location} не проксирует на бэкенд"
+        )
