@@ -13,6 +13,9 @@ __pycache__/
 # Node/docker build junk
 node_modules/
 frontend/dist/
-docs/
+# Корпус документации T-FLEX (маунтится в контейнер) — не в репо;
+# исключение — дизайн-спеки
+docs/*
+!docs/superpowers/
 .mypy_cache/
 .pytest_cache/
