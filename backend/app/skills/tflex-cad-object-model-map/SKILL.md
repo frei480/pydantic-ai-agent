@@ -16,6 +16,15 @@ Use `TFlexCAD API/055594cd-1cb5-4213-990c-1c9c4a0572ab.md` to find relevant type
 5. Search and read the pages for the exact operations, properties, and related types needed by the task. Confirm signatures, overloads, nullability, and side effects from those pages; do not derive them from class names or diagram arrows.
 6. Cite the documentation file and line numbers for verified facts. If the documentation does not establish a behavior, state the gap rather than guessing.
 
+## Points are nodes (точка = узел)
+
+There is no standalone "point" model object: what the UI calls a point (точка) is a node. Coordinate structs are separate from these model objects.
+
+- **3D points**: `TFlex.Model.Model3D.Node3D`, base class of all 3D nodes (`ModelObject` → `Object3D` → `Construction3D` → `Node3D`; `T_TFlex_Model_Model3D_Node3D.md`). Direct subtypes: `CoordinateNode3D` (by coordinates), `GeometryNode3D` (offset from another node or vertex), `IntersectionNode3D` (intersection of axes/wires/solids/planes), `LCSPoint`, `MassCenterNode3D`, `OnFaceOffsetPoint`, `OnSurfacePoint`, `OnWirePoint`, `ReferenceNode3D`, `RelationPoint`, `ThreePlanesPoint` (three planes), `TwoPathesIntersectionPoint` (two 3D paths), `WorkplaneNode3D`; deeper descendants exist, for example `MeshPoint : ThreePlanesPoint`. Names mix `*Node3D` and `*Point` — all are nodes.
+- **2D points**: `TFlex.Model.Model2D.Node`, base class of the 2D node (`Node : Object2D`; `T_TFlex_Model_Model2D_Node.md`). Direct subtypes: `BetweenNode`, `CopyNode`, `FragmentNode`, `FreeNode`, `IntersectionNode`, `NamedFragmentNode`, `ObjectNode`, `ProjectionNode`, `RelativeNode`. No 2D class name contains "Point".
+- Enumerating points: `Document.GetNodes()` returns the 2D nodes, `document.GetNodes3D()` (extension method) returns the 3D nodes; `Document.GetObjects()` returns all model objects for type-based filtering. Verify return types on the member pages.
+- The object-model diagram does not list every node subtype (`TwoPathesIntersectionPoint` is missing from it). For a point where two 3D paths intersect use `TwoPathesIntersectionPoint` (`PathFirst`/`PathSecond` of type `Path3D`), not `IntersectionNode3D`. Treat the derived-type list on the base-class page as the family index, not the diagram.
+
 ## Useful routes
 
 - **2D drawing objects:** identify whether the task concerns a node, construction, outline, text, dimension, view, or other drawing object; then inspect that concrete type and its bases.

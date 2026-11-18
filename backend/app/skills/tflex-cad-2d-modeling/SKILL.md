@@ -19,7 +19,7 @@ Use this workflow for 2D model objects and drawing automation. The index and cla
 
 ## Routing hints
 
-- Free, intersection, and object nodes: inspect the node-specific example and type.
+- Nodes are the 2D points (the `Node` family: free, intersection, object, between, relative, copy, projection, fragment; no 2D class name contains "Point"): inspect the node-specific example and type.
 - Lines, circles, splines, and paths: distinguish construction geometry from drawing outlines.
 - Dimensions, text, roughness, hatching, and leaders: verify required geometry references and annotation-specific parameters.
 - Views, sections, fragments, and copies: verify source document/object requirements and the operation's side effects.

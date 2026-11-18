@@ -19,7 +19,8 @@ Use this workflow for 3D modeling tasks. Class diagrams help locate related type
 
 ## Routing hints
 
-- 3D nodes and coordinate systems: verify reference geometry and coordinate-system semantics.
+- 3D nodes are points (the `Node3D` family; subtypes mix `*Node3D` and `*Point` names) and coordinate systems: verify reference geometry and coordinate-system semantics.
+- A point where two 3D paths intersect is `TwoPathesIntersectionPoint` (`PathFirst`/`PathSecond`); `IntersectionNode3D` is for axes, wires, solids, and planes, not paths.
 - Profiles, workplanes, and paths: verify required inputs and whether source objects are 2D, 3D, or generated geometry.
 - Extrusion, rotation, sweep, loft, Boolean, and blending: use the matching operation example and inspect its exact API pages.
 - Transformations and fragments: verify source/target coordinate systems, ownership, and whether the operation mutates or creates an object.
