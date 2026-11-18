@@ -9,7 +9,7 @@
 ## Архитектура
 
 ```
-[frontend nginx :8080] --proxy /api--> [backend uvicorn :8000]
+[frontend nginx :8080] --proxy /api, /docs, /redoc, /openapi.json--> [backend uvicorn :8000]
                                           tools: ripgrep / read_file / file_info / list_dir
                                           agents: researcher -> DOCs/CAD specialists -> critic -> writer
                                           sqlite: чаты и история переписки
@@ -166,6 +166,9 @@ docker compose up --build
 
 - Фронтенд: <http://localhost:8080>
 - API бэкенда: <http://localhost:8001/api/health>
+- Документация API: <http://localhost:8080/docs> (ReDoc: `/redoc`) — открывать через
+  порт фронтенда: статика Swagger UI/ReDoc локальная (`frontend/public/static/docs-assets`),
+  интернет не нужен; на порту бэкенда страница будет без статики
 
 Проверка доступности модели выполняет тестовый запрос к провайдеру; результат кешируется на
 1 час, чтобы индикатор в браузере не расходовал квоту при каждом обновлении.
