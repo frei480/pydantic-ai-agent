@@ -172,6 +172,27 @@ def _chat_out(chat: ChatSummary) -> ChatOut:
     }
 
 
+async def _current_user_id(login: str) -> int | None:
+    """user_id текущего пользователя; в off-режиме — None (псевдопользователь)."""
+    if auth.AUTH_MODE != "kerberos":
+        return None
+    return await dbase.get_or_create_user(login)
+
+
+async def chat_for(owner_login: str, chat_id: int) -> Chat:
+    """Чат для владельца или админа (наследие); иначе 404 без раскрытия."""
+    chat = await dbase.get_chat(chat_id)
+    if chat is None:
+        raise HTTPException(status_code=404, detail="chat not found")
+    if auth.AUTH_MODE != "kerberos":
+        return chat
+    user_id = await dbase.get_or_create_user(owner_login)
+    is_admin = auth.is_admin_login(owner_login)
+    if chat["user_id"] == user_id or (chat["user_id"] is None and is_admin):
+        return chat
+    raise HTTPException(status_code=404, detail="chat not found")
+
+
 def _sse(event: dict[str, object]) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
@@ -414,6 +435,7 @@ async def delete_admin_skill(
 )
 async def search_indexed_pages_endpoint(
     body: IndexedPageSearchIn,
+    _: str = Depends(auth.require_user),
 ) -> IndexedPageSearchOut:
     """Run the same indexed-page search used by the agent, without an LLM call."""
     started_at = time.perf_counter()
@@ -448,12 +470,14 @@ async def search_indexed_pages_endpoint(
 
 
 @app.get("/api/settings")
-async def get_settings() -> SettingsOut:
+async def get_settings(_: str = Depends(auth.require_user)) -> SettingsOut:
     return _settings_out(agent.current_model_settings())
 
 
 @app.put("/api/settings")
-async def update_settings(body: ModelSettingsIn) -> SettingsOut:
+async def update_settings(
+    body: ModelSettingsIn, _: str = Depends(auth.require_admin_user)
+) -> SettingsOut:
     global _model_health_cache, _model_health_checked_at
     current = agent.current_model_settings()
     if body.clear_api_key and body.api_key:
@@ -493,7 +517,7 @@ async def update_settings(body: ModelSettingsIn) -> SettingsOut:
 
 
 @app.get("/api/health/model")
-async def model_health() -> ModelHealthOut:
+async def model_health(_: str = Depends(auth.require_user)) -> ModelHealthOut:
     global _model_health_cache, _model_health_checked_at
     async with _model_health_lock:
         settings = agent.current_model_settings()
@@ -528,13 +552,25 @@ async def model_health() -> ModelHealthOut:
 
 
 @app.get("/api/chats")
-async def list_chats() -> list[ChatOut]:
-    return [_chat_out(c) for c in await dbase.list_chats()]
+async def list_chats(_: str = Depends(auth.require_user)) -> list[ChatOut]:
+    user_id = await _current_user_id(_)
+    include_legacy = auth.AUTH_MODE != "kerberos" or auth.is_admin_login(_)
+    return [
+        _chat_out(c)
+        for c in await dbase.list_chats(
+            user_id=user_id, include_legacy=include_legacy
+        )
+    ]
 
 
 @app.post("/api/chats")
-async def create_chat(body: ChatIn) -> ChatOut:
-    chat_id = await dbase.create_chat(title=body.title.strip() or "Новый чат")
+async def create_chat(
+    body: ChatIn, login: str = Depends(auth.require_user)
+) -> ChatOut:
+    user_id = await _current_user_id(login)
+    chat_id = await dbase.create_chat(
+        title=body.title.strip() or "Новый чат", user_id=user_id
+    )
     chat = await dbase.get_chat(chat_id)
     if chat is None:
         raise RuntimeError(f"created chat {chat_id} could not be loaded")
@@ -542,16 +578,19 @@ async def create_chat(body: ChatIn) -> ChatOut:
 
 
 @app.delete("/api/chats/{chat_id}")
-async def delete_chat(chat_id: int) -> dict[str, bool]:
+async def delete_chat(
+    chat_id: int, login: str = Depends(auth.require_user)
+) -> dict[str, bool]:
+    await chat_for(login, chat_id)
     await dbase.delete_chat(chat_id)
     return {"ok": True}
 
 
 @app.get("/api/chats/{chat_id}/messages")
-async def get_messages(chat_id: int) -> ChatMessagesOut:
-    chat = await dbase.get_chat(chat_id)
-    if chat is None:
-        raise HTTPException(status_code=404, detail="chat not found")
+async def get_messages(
+    chat_id: int, login: str = Depends(auth.require_user)
+) -> ChatMessagesOut:
+    chat = await chat_for(login, chat_id)
     return {
         "chat": _chat_out(chat),
         "messages": await dbase.get_messages(chat_id),
@@ -559,14 +598,14 @@ async def get_messages(chat_id: int) -> ChatMessagesOut:
 
 
 @app.post("/api/chats/{chat_id}/messages")
-async def post_message(chat_id: int, body: MessageIn) -> StreamingResponse:
+async def post_message(
+    chat_id: int, body: MessageIn, login: str = Depends(auth.require_user)
+) -> StreamingResponse:
     """Отправить сообщение пользователя в чат; ответ агента приходит потоком SSE."""
     content = body.content.strip()
     if not content:
         raise HTTPException(status_code=400, detail="Пустое сообщение")
-    chat = await dbase.get_chat(chat_id)
-    if chat is None:
-        raise HTTPException(status_code=404, detail="chat not found")
+    chat = await chat_for(login, chat_id)
 
     # Сохраняем сообщение пользователя и задаём заголовок чата по первому сообщению.
     await dbase.add_message(chat_id, "user", content)
