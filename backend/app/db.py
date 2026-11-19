@@ -8,12 +8,24 @@ from .config import DB_PATH, DEFAULT_CONTEXT_WINDOW_TOKENS
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    login TEXT NOT NULL UNIQUE,
+    upn TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_seen_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS app_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS chats (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL DEFAULT 'Новый чат',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    history_json TEXT NOT NULL DEFAULT ''
+    history_json TEXT NOT NULL DEFAULT '',
+    user_id INTEGER REFERENCES users(id)
 );
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,6 +75,12 @@ class Database:
                     f"ALTER TABLE model_settings ADD COLUMN {column} "
                     f"INTEGER NOT NULL DEFAULT {default}"
                 )
+        cur = await self._conn.execute("PRAGMA table_info(chats)")
+        chat_columns = {row["name"] for row in await cur.fetchall()}
+        if "user_id" not in chat_columns:
+            await self._conn.execute(
+                "ALTER TABLE chats ADD COLUMN user_id INTEGER REFERENCES users(id)"
+            )
         await self._conn.commit()
 
     async def close(self) -> None:
@@ -75,11 +93,66 @@ class Database:
         assert self._conn is not None, "database not connected"
         return self._conn
 
+    # ---- users ----
+
+    async def get_or_create_user(self, login: str, upn: str | None = None) -> int:
+        login = login.lower()
+        cur = await self.conn.execute(
+            "SELECT id FROM users WHERE login = ?", (login,)
+        )
+        row = await cur.fetchone()
+        if row is not None:
+            return int(row["id"])
+        cur = await self.conn.execute(
+            "INSERT INTO users (login, upn) VALUES (?, ?)", (login, upn or "")
+        )
+        await self.conn.commit()
+        return cur.lastrowid  # type: ignore[return-value]
+
+    async def touch_user(self, user_id: int) -> None:
+        await self.conn.execute(
+            "UPDATE users SET last_seen_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (user_id,),
+        )
+        await self.conn.commit()
+
+    # ---- app_meta ----
+
+    async def get_meta(self, key: str) -> str | None:
+        cur = await self.conn.execute(
+            "SELECT value FROM app_meta WHERE key = ?", (key,)
+        )
+        row = await cur.fetchone()
+        return row["value"] if row is not None else None
+
+    async def set_meta(self, key: str, value: str) -> None:
+        await self.conn.execute(
+            "INSERT INTO app_meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        await self.conn.commit()
+
     # ---- chats ----
 
-    async def list_chats(self) -> list[ChatSummary]:
+    async def list_chats(
+        self, user_id: int | None = None, include_legacy: bool = True
+    ) -> list[ChatSummary]:
+        # Псевдопользователь без id (off-режим) видит только наследие;
+        # владелец — свои чаты и, с include_legacy, ещё и наследие.
+        if user_id is None:
+            clause = "user_id IS NULL" if include_legacy else "1 = 0"
+            params: tuple = ()
+        else:
+            clause = "user_id = ?"
+            if include_legacy:
+                clause += " OR user_id IS NULL"
+            params = (user_id,)
         cur = await self.conn.execute(
-            "SELECT id, title, created_at, updated_at FROM chats ORDER BY updated_at DESC, id DESC"
+            "SELECT id, title, created_at, updated_at FROM chats "
+            f"WHERE {clause} "
+            "ORDER BY updated_at DESC, id DESC",
+            params,
         )
         return [
             ChatSummary(
@@ -91,9 +164,11 @@ class Database:
             for row in await cur.fetchall()
         ]
 
-    async def create_chat(self, title: str = "Новый чат") -> int:
+    async def create_chat(
+        self, title: str = "Новый чат", user_id: int | None = None
+    ) -> int:
         cur = await self.conn.execute(
-            "INSERT INTO chats (title) VALUES (?)", (title,)
+            "INSERT INTO chats (title, user_id) VALUES (?, ?)", (title, user_id)
         )
         await self.conn.commit()
         return cur.lastrowid  # type: ignore[return-value]
@@ -109,6 +184,7 @@ class Database:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             history_json=row["history_json"],
+            user_id=row["user_id"],
         )
 
     async def delete_chat(self, chat_id: int) -> None:

@@ -20,6 +20,7 @@ class ChatSummary(TypedDict):
 
 class Chat(ChatSummary):
     history_json: str
+    user_id: int | None
 
 
 class Message(TypedDict):
