@@ -30,6 +30,8 @@ from .config import (
     ADMIN_PASSWORD,
     DB_PATH,
     DOCS_ROOT,
+    USER_COOKIE_NAME,
+    USER_SESSION_MAX_AGE,
 )
 from .doc_catalog import preload_doc_catalogs, search_indexed_pages
 from .model import (
@@ -51,6 +53,7 @@ from .model import (
     SkillOut,
     SkillSummaryOut,
     SettingsOut,
+    WhoamiOut,
 )
 
 dbase = db.Database(str(DB_PATH))
@@ -197,6 +200,62 @@ async def health() -> HealthOut:
         "docs_root": DOCS_ROOT.name + "/",
         "context_token_limit": settings.context_window_tokens,
     }
+
+
+@app.get("/api/auth/whoami", response_model=WhoamiOut)
+async def whoami(request: Request, response: Response) -> WhoamiOut:
+    """Личность вошедшего; вход — SPNEGO-билет домена в Authorization."""
+    if auth.AUTH_MODE != "kerberos":
+        return WhoamiOut(login="dev", is_admin=True)
+
+    token = request.cookies.get(USER_COOKIE_NAME)
+    if token:
+        secret = await auth.session_secret(dbase)
+        login = auth.read_user_session(token, secret)
+        if login is not None:
+            return WhoamiOut(login=login, is_admin=auth.is_admin_login(login))
+
+    authorization = request.headers.get("authorization")
+    if authorization:
+        try:
+            login, upn = auth.accept_negotiate_token(authorization)
+        except auth.NegotiateError:
+            raise HTTPException(status_code=401, detail="Билет не принят")
+        user_id = await dbase.get_or_create_user(login, upn)
+        await dbase.touch_user(user_id)
+        secret = await auth.session_secret(dbase)
+        expires_at = int(time.time()) + USER_SESSION_MAX_AGE
+        response.set_cookie(
+            USER_COOKIE_NAME,
+            auth.sign_user_session(login, expires_at, secret),
+            max_age=USER_SESSION_MAX_AGE,
+            httponly=True,
+            secure=request.url.scheme == "https",
+            samesite="strict",
+            path="/api",
+        )
+        return WhoamiOut(login=login, is_admin=auth.is_admin_login(login))
+
+    # Заголовок именно в исключении: FastAPI отбрасывает заголовки
+    # инжектированного response при HTTPException.
+    raise HTTPException(
+        status_code=401,
+        detail="Требуется вход",
+        headers={"WWW-Authenticate": "Negotiate"},
+    )
+
+
+@app.post("/api/auth/logout")
+async def logout(request: Request, response: Response) -> dict[str, bool]:
+    """Удалить cookie сессии; перевход произойдёт молча при следующем whoami."""
+    response.delete_cookie(
+        USER_COOKIE_NAME,
+        path="/api",
+        httponly=True,
+        secure=request.url.scheme == "https",
+        samesite="strict",
+    )
+    return {"ok": True}
 
 
 @app.post("/api/admin/login", response_model=AdminSessionOut)

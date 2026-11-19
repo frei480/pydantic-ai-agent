@@ -109,6 +109,50 @@ async def init_auth(dbase) -> None:
         )
 
 
+# ---- SPNEGO-акцептор (только kerberos-режим) ----
+
+
+class NegotiateError(Exception):
+    """Билет не принят; детали — в reason и логе, клиенту — краткость."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def accept_negotiate_token(header_value: str) -> tuple[str, str]:
+    """Проверить Negotiate-токен из Authorization; вернуть (login, upn)."""
+    import base64
+    import spnego  # лениво: только kerberos-режим, в образе/проде
+
+    scheme, _, token_text = header_value.strip().partition(" ")
+    if scheme.lower() != "negotiate" or not token_text:
+        raise NegotiateError("ожидался заголовок Authorization: Negotiate")
+    try:
+        in_token = base64.b64decode(token_text)
+    except ValueError as exc:
+        raise NegotiateError("токен не является base64") from exc
+    try:
+        # Акцептор: ключ из keytab (env KRB5_KTNAME), principal при
+        # KRB5_PRINCIPAL передаётся как spn, иначе берётся из keytab.
+        options = []
+        kwargs = {}
+        if config.KRB5_PRINCIPAL:
+            kwargs["spn"] = config.KRB5_PRINCIPAL
+        ctx = spnego.server(options=options, **kwargs)
+        ctx.step(in_token)
+        if not ctx.complete:
+            raise NegotiateError("потребовалось продолжение SPNEGO (не поддерживается)")
+        upn = ctx.username  # 'IVANOV@CORP.LOCAL'
+    except NegotiateError:
+        raise
+    except Exception as exc:  # спека: детали в лог, клиенту — краткость
+        logger.warning("Negotiate отклонён: %s", exc)
+        raise NegotiateError("билет не принят") from exc
+    login = upn.split("@", 1)[0].lower()
+    return login, upn
+
+
 # ---- зависимости доступа ----
 
 
