@@ -12,6 +12,20 @@ LLM_ERROR_LOG_PATH = Path(
 )
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 
+# --- аутентификация (многопользовательский режим) ---
+# Логины администраторов из env, нижний регистр: "IVANOV, petrov" → {"ivanov", "petrov"}
+ADMIN_USERS = {
+    item.strip().lower()
+    for item in os.getenv("ADMIN_USERS", "").split(",")
+    if item.strip()
+}
+# auth: auto | kerberos | off (см. app/auth.py)
+AUTH_MODE_SETTING = os.getenv("AUTH_MODE", "auto")
+KRB5_KEYTAB = os.getenv("KRB5_KTNAME", "")
+KRB5_PRINCIPAL = os.getenv("KRB5_PRINCIPAL", "")
+USER_SESSION_MAX_AGE = 12 * 60 * 60
+USER_COOKIE_NAME = "docs_ai_session"
+
 # --- модель ---
 RAW_MODEL = os.getenv("AI_MODEL", "openai:gpt-4o-mini").strip()
 # принимаем вид "openai:<имя>" или просто <имя> (OpenAI-совместимый провайдер)

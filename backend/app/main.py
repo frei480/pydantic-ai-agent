@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import hmac
 import json
 import logging
@@ -10,7 +9,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.openapi.docs import (
     get_redoc_html,
     get_swagger_ui_html,
@@ -19,8 +18,14 @@ from fastapi.openapi.docs import (
 from fastapi.responses import StreamingResponse
 from openai import APIError
 
-from . import agent, db, llm_errors
+from . import agent, auth, db, llm_errors
 from .admin_content import AdminContentStore, skill_metadata
+from .auth import (
+    ADMIN_COOKIE_NAME,
+    ADMIN_SESSION_MAX_AGE,
+    _admin_session_token,
+    require_admin,
+)
 from .config import (
     ADMIN_PASSWORD,
     DB_PATH,
@@ -52,8 +57,6 @@ dbase = db.Database(str(DB_PATH))
 admin_content = AdminContentStore(DB_PATH.parent)
 logger = logging.getLogger(__name__)
 MODEL_HEALTH_CACHE_TTL = 60 * 60
-ADMIN_SESSION_MAX_AGE = 8 * 60 * 60
-ADMIN_COOKIE_NAME = "docs_ai_admin"
 _admin_config_lock = asyncio.Lock()
 _admin_login_lock = threading.Lock()
 _admin_login_failures: dict[str, tuple[int, float]] = {}
@@ -75,6 +78,7 @@ async def lifespan(app: FastAPI):
     )
     agent.configure_agent_admin_content(admin_config, admin_content.skills_root)
     await dbase.connect()
+    await auth.init_auth(dbase)
     settings = await dbase.get_model_settings()
     if settings is None:
         defaults = agent.current_model_settings()
@@ -132,46 +136,6 @@ async def redoc_html():
         redoc_favicon_url="/static/docs-assets/favicon-32x32.png",
         with_google_fonts=False,
     )
-
-
-def _admin_session_token(expires_at: int) -> str:
-    message = f"admin-session-v1:{expires_at}".encode()
-    signature = hmac.new(
-        ADMIN_PASSWORD.encode(), message, hashlib.sha256
-    ).hexdigest()
-    return f"{expires_at}.{signature}"
-
-
-def _valid_admin_session(token: str | None) -> bool:
-    if not ADMIN_PASSWORD or len(ADMIN_PASSWORD) < 16 or not token:
-        return False
-    try:
-        expires_text, signature = token.split(".", 1)
-        expires_at = int(expires_text)
-    except (ValueError, TypeError):
-        return False
-    now = int(time.time())
-    if expires_at <= now or expires_at > now + ADMIN_SESSION_MAX_AGE:
-        return False
-    expected = _admin_session_token(expires_at).split(".", 1)[1]
-    return hmac.compare_digest(signature, expected)
-
-
-def require_admin(
-    request: Request,
-    response: Response,
-    x_admin_request: str | None = Header(default=None),
-) -> None:
-    response.headers["Cache-Control"] = "no-store"
-    if not ADMIN_PASSWORD or len(ADMIN_PASSWORD) < 16:
-        raise HTTPException(
-            status_code=503,
-            detail="Задайте ADMIN_PASSWORD длиной не менее 16 символов на сервере",
-        )
-    if not _valid_admin_session(request.cookies.get(ADMIN_COOKIE_NAME)):
-        raise HTTPException(status_code=401, detail="Требуется вход администратора")
-    if request.method not in {"GET", "HEAD", "OPTIONS"} and x_admin_request != "1":
-        raise HTTPException(status_code=403, detail="Недопустимый запрос администратора")
 
 
 def _skill_error(exc: Exception) -> HTTPException:

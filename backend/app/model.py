@@ -65,6 +65,11 @@ class HealthOut(TypedDict):
     context_token_limit: int
 
 
+class WhoamiOut(TypedDict):
+    login: str
+    is_admin: bool
+
+
 class ModelHealthOut(TypedDict):
     status: Literal["ok", "error"]
     model: str
