@@ -132,8 +132,22 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+type Session = { login: string; is_admin: boolean };
+type AuthState = "checking" | "ok" | "failed";
+
+// Перепроверка доменного входа при 401 от api(); назначается компонентом App.
+let refreshSession: (() => Promise<Session | null>) | null = null;
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, init);
+  let response = await fetch(path, init);
+  if (response.status === 401 && refreshSession) {
+    // Сессия могла истечь посреди работы: один повторный whoami и повтор
+    // исходного запроса (браузер сам прикладывает Negotiate при необходимости).
+    const session = await refreshSession();
+    if (session) {
+      response = await fetch(path, init);
+    }
+  }
   if (!response.ok) {
     let detail = `${response.status} ${response.statusText}`;
     try {
@@ -173,6 +187,8 @@ function ServiceIndicator({ label, status, title }: { label: string; status: Ser
 }
 
 function App() {
+  const [authState, setAuthState] = useState<AuthState>("checking");
+  const [session, setSession] = useState<Session | null>(null);
   const [chats, setChats] = useState<Chat[]>([]);
   const [currentId, setCurrentId] = useState<number | null>(null);
   const [currentTitle, setCurrentTitle] = useState("Новый чат");
@@ -211,6 +227,33 @@ function App() {
   const scrollBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, []);
+
+  const runWhoami = useCallback(async (): Promise<Session | null> => {
+    try {
+      const response = await fetch("/api/auth/whoami", { cache: "no-store" });
+      if (!response.ok) {
+        setSession(null);
+        setAuthState("failed");
+        return null;
+      }
+      const data = (await response.json()) as Session;
+      setSession(data);
+      setAuthState("ok");
+      return data;
+    } catch {
+      setSession(null);
+      setAuthState("failed");
+      return null;
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshSession = runWhoami;
+    void runWhoami();
+    return () => {
+      refreshSession = null;
+    };
+  }, [runWhoami]);
 
   useEffect(() => {
     scrollBottom();
@@ -266,13 +309,14 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (authState !== "ok") return;
     void loadChats().catch((loadError: unknown) =>
       setError(`Не удалось загрузить чаты: ${errorMessage(loadError)}`),
     );
     void checkHealth();
     const timer = window.setInterval(() => void checkHealth(), 60_000);
     return () => window.clearInterval(timer);
-  }, [checkHealth, loadChats]);
+  }, [authState, checkHealth, loadChats]);
 
   const addActivity = (activity: Omit<Activity, "id">) => {
     setActivities((current) => [...current, { ...activity, id: ++activityId.current }]);
@@ -569,6 +613,60 @@ function App() {
     }
   };
 
+  if (authState === "checking") {
+    return (
+      <div className="flex h-[100dvh] flex-col items-center justify-center gap-4 bg-[#f8f9fb]">
+        <LoaderCircle size={30} className="animate-spin text-[#315fce]" />
+        <div className="text-[13px] text-slate-500">Входим через домен…</div>
+      </div>
+    );
+  }
+
+  if (authState === "failed") {
+    const retryLogin = () => {
+      setAuthState("checking");
+      void runWhoami();
+    };
+    return (
+      <div className="flex h-[100dvh] items-center justify-center bg-[#f8f9fb] px-4">
+        <div className="w-full max-w-[440px] rounded-2xl border border-slate-200 bg-white p-6 shadow-[0_16px_60px_rgba(15,23,42,0.10)] sm:p-7">
+          <div className="mb-4 flex h-11 w-11 items-center justify-center rounded-[14px] bg-rose-50 text-rose-500">
+            <AlertCircle size={22} />
+          </div>
+          <h1 className="text-[17px] font-semibold tracking-[-0.02em] text-slate-900">
+            Не удалось войти через домен
+          </h1>
+          <p className="mt-2 text-[12px] leading-5 text-slate-500">
+            Приложение использует доменный вход без пароля. Проверьте:
+          </p>
+          <ul className="mt-3 space-y-2 text-[12px] leading-5 text-slate-600">
+            <li className="flex gap-2">
+              <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-slate-300" />
+              Откройте приложение в Microsoft Edge или Google Chrome на компьютере, входящем в домен.
+            </li>
+            <li className="flex gap-2">
+              <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-slate-300" />
+              В Firefox включите параметр <code className="rounded bg-slate-100 px-1 py-0.5 text-[11px]">network.negotiate-auth.trusted-uris</code>{" "}
+              (страница <span className="font-medium">about:config</span>) со значением{" "}
+              <span className="font-medium">docs.corp</span>.
+            </li>
+            <li className="flex gap-2">
+              <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-slate-300" />
+              Если не помогает — обратитесь к администратору.
+            </li>
+          </ul>
+          <button
+            type="button"
+            onClick={retryLogin}
+            className="mt-5 inline-flex h-9 w-full items-center justify-center gap-2 rounded-lg bg-[#315fce] px-4 text-xs font-medium text-white transition hover:bg-[#244eaf]"
+          >
+            Повторить
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-[100dvh] overflow-hidden bg-[#f8f9fb]">
       {sidebarOpen && (
@@ -660,9 +758,24 @@ function App() {
               <div className="mt-0.5 truncate text-[10px] text-slate-400">С опорой на API-документацию</div>
             </div>
           </div>
-          <a href="/admin" className="mt-2 flex items-center gap-2 rounded-lg px-3 py-2 text-[11px] text-slate-500 transition hover:bg-slate-50 hover:text-[#315fce]">
-            <Settings2 size={14} /> Администрирование агента
-          </a>
+          <div className="mt-2 flex items-center gap-2.5 rounded-lg px-3 py-2" title="Вы вошли как">
+            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-slate-100 text-[11px] font-semibold uppercase text-slate-600">
+              {(session?.login || "?").slice(0, 1)}
+            </span>
+            <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-slate-600">
+              {session?.login}
+            </span>
+            {session?.is_admin && (
+              <span className="shrink-0 rounded-full bg-blue-50 px-2 py-0.5 text-[9px] font-medium text-[#315fce]">
+                админ
+              </span>
+            )}
+          </div>
+          {session?.is_admin && (
+            <a href="/admin" className="mt-1 flex items-center gap-2 rounded-lg px-3 py-2 text-[11px] text-slate-500 transition hover:bg-slate-50 hover:text-[#315fce]">
+              <Settings2 size={14} /> Администрирование агента
+            </a>
+          )}
         </div>
       </aside>
 
@@ -691,15 +804,17 @@ function App() {
               title={modelDetail || modelName || "Состояние модели"}
             />
           </div>
-          <button
-            type="button"
-            aria-label="Настройки ИИ-провайдера"
-            title="Настройки ИИ-провайдера"
-            onClick={() => void openSettings()}
-            className="ml-1 rounded-lg p-2 text-slate-500 transition hover:bg-slate-100 hover:text-[#315fce]"
-          >
-            <Settings2 size={17} />
-          </button>
+          {session?.is_admin && (
+            <button
+              type="button"
+              aria-label="Настройки ИИ-провайдера"
+              title="Настройки ИИ-провайдера"
+              onClick={() => void openSettings()}
+              className="ml-1 rounded-lg p-2 text-slate-500 transition hover:bg-slate-100 hover:text-[#315fce]"
+            >
+              <Settings2 size={17} />
+            </button>
+          )}
         </header>
 
         <div className="flex min-h-0 flex-1 flex-col">
