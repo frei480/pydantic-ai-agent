@@ -11,16 +11,29 @@ COPY packages/ripgrep_14.1.1-1+b4_amd64.deb /tmp/ripgrep.deb
 RUN dpkg -i /tmp/ripgrep.deb \
     && rm -f /tmp/ripgrep.deb
 
+# Runtime-библиотеки MIT Kerberos для доменного входа (python-gssapi/pyspnego).
+# Тоже из вендоренных .deb (packages/README.md): krb5 1.21.3-5+deb13u1
+# (Debian trixie, amd64), e2fsprogs/libkeyutils — их версии в таблице.
+COPY packages/libgssapi-krb5-2_1.21.3-5+deb13u1_amd64.deb /tmp/krb/
+COPY packages/libkrb5-3_1.21.3-5+deb13u1_amd64.deb /tmp/krb/
+COPY packages/libk5crypto3_1.21.3-5+deb13u1_amd64.deb /tmp/krb/
+COPY packages/libkrb5support0_1.21.3-5+deb13u1_amd64.deb /tmp/krb/
+COPY packages/libcom-err2_1.47.2-3+b12_amd64.deb /tmp/krb/
+COPY packages/libkeyutils1_1.6.3-6_amd64.deb /tmp/krb/
+RUN dpkg -i /tmp/krb/*.deb \
+    && rm -rf /tmp/krb
+
 WORKDIR /app
 
 COPY requirements.txt /app/requirements.txt
 # Зависимости ставятся ТОЛЬКО из вендоренных wheels (backend/wheels) — без
 # доступа в PyPI: развёртывание в изолированной сети. Набор wheels и есть
 # фиксация версий; как обновлять — wheels/README.md. BuildKit bind-mount:
-# папка wheels не попадает в слои образа.
+# папка wheels не попадает в слои образа. gssapi — вручную собранное колесо
+# (в requirements.txt его нет, см. wheels/README.md).
 RUN --mount=type=bind,source=wheels,target=/wheels \
     pip install --no-cache-dir --no-index --find-links=/wheels \
-    -r /app/requirements.txt
+    -r /app/requirements.txt gssapi
 
 COPY app /app/app
 

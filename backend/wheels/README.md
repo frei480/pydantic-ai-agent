@@ -33,6 +33,9 @@ docker run --rm -v "$(pwd)/backend/wheels:/out" python:3.14-slim \
 колесо привязано к платформе (linux/amd64) и ABI CPython. gssapi не входит
 в `requirements.txt` — Dockerfile ставит его отдельным аргументом из
 `/wheels`, чтобы «pip download» набора не пытался тянуть его sdist.
+Python-зависимость gssapi — `decorator` — тоже докачивается в этот каталог
+руками (`pip download --no-deps decorator -d /out` в том же контейнере):
+резолвер найдёт её через `--find-links=/wheels`.
 
 ## Как обновлять
 
