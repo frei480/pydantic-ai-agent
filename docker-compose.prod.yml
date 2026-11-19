@@ -1,0 +1,11 @@
+# Override для развёртывания с доменным входом (Kerberos SSO).
+# Запуск на сервере: docker compose -f docker-compose.yml -f docker-compose.prod.yml up
+# Файлы ./deploy/krb5.conf и ./secrets/docs-ai.keytab на сервере обязательны;
+# базовый docker compose up (без этого override) на дев-машине остаётся рабочим.
+services:
+  backend:
+    volumes:
+      # Конфигурация домена: KDC и realm для проверки билетов
+      - ./deploy/krb5.conf:/etc/krb5.conf:ro
+      # Keytab сервиса HTTP/docs.corp@CORP.LOCAL (выписан администратором домена)
+      - ./secrets/docs-ai.keytab:/app/secrets/docs-ai.keytab:ro

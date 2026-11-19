@@ -2,7 +2,9 @@ services:
   backend:
     build: ./backend
     ports:
-      - "${BACKEND_PORT:-8001}:8000"
+      # Только localhost: мимо nginx (и доменного входа) бэкенд не обходят,
+      # отладка — по SSH-туннелю (решение заказчика).
+      - "127.0.0.1:${BACKEND_PORT:-8001}:8000"
     environment:
       # LLM (OpenAI-совместимый API)
       AI_MODEL: ${AI_MODEL:-openai:gpt-4o-mini}
@@ -10,6 +12,11 @@ services:
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
       CRITIC_MODEL: ${CRITIC_MODEL:-}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      # Доменный вход (Kerberos SSO): режим, админы, keytab и SPN — из .env
+      AUTH_MODE: ${AUTH_MODE:-auto}
+      ADMIN_USERS: ${ADMIN_USERS:-}
+      KRB5_KTNAME: ${KRB5_KTNAME:-}
+      KRB5_PRINCIPAL: ${KRB5_PRINCIPAL:-}
       # Документация
       DOCS_ROOT: /app/docs
       # Установленные примеры T-FLEX DOCs API

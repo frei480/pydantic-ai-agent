@@ -1,0 +1,17 @@
+# Конфигурация Kerberos для контейнера бэкенда (см. docker-compose.prod.yml).
+# Скопировать в ./deploy/krb5.conf и заменить заглушки на значения домена.
+[libdefaults]
+    default_realm = CORP.LOCAL
+    # Билеты AD и так clock-skew-чувствительны — держим разумный допуск.
+    clockskew = 300
+
+[realms]
+    CORP.LOCAL = {
+        # Контроллеры домена (KDC). Можно перечислить несколько для отказоустойчивости.
+        kdc = dc01.corp.local
+        admin_server = dc01.corp.local
+    }
+
+[domain_realm]
+    .corp.local = CORP.LOCAL
+    corp.local = CORP.LOCAL
