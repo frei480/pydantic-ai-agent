@@ -240,10 +240,50 @@ async def check_logout():
             await database.close()
 
 
+def check_cli_off_mode():
+    import subprocess
+
+    env = dict(os.environ)
+    env.pop("KRB5_KTNAME", None)
+    env["AUTH_MODE"] = "auto"
+    result = subprocess.run(
+        [sys.executable, "-m", "app.auth", "--check"],
+        cwd="backend",
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "выключена" in output, output
+
+
+def check_cli_kerberos_missing_keytab():
+    import subprocess
+
+    env = dict(os.environ)
+    env["AUTH_MODE"] = "kerberos"
+    env["KRB5_KTNAME"] = "/нет/такого"
+    result = subprocess.run(
+        [sys.executable, "-m", "app.auth", "--check"],
+        cwd="backend",
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    assert "keytab" in output.lower(), output
+
+
 check_session_token_roundtrip()
 asyncio.run(check_init_auth_modes())
 asyncio.run(check_require_user_off())
 asyncio.run(check_whoami_flow())
 asyncio.run(check_whoami_bad_token())
 asyncio.run(check_logout())
+check_cli_off_mode()
+check_cli_kerberos_missing_keytab()
 print("AUTH-OK")

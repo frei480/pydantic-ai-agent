@@ -76,6 +76,21 @@ def read_user_session(token: str, secret: str) -> str | None:
     return login
 
 
+def _keytab_available() -> bool:
+    keytab = config.KRB5_KEYTAB
+    return bool(keytab) and os.path.isfile(keytab) and os.access(keytab, os.R_OK)
+
+
+def _resolve_auth() -> tuple[str, bool]:
+    """(итоговый режим, доступен ли keytab) без обращения к БД."""
+    keytab_ok = _keytab_available()
+    if config.AUTH_MODE_SETTING == "kerberos":
+        return "kerberos", keytab_ok
+    if config.AUTH_MODE_SETTING == "auto":
+        return ("kerberos" if keytab_ok else "off"), keytab_ok
+    return "off", keytab_ok
+
+
 async def init_auth(dbase) -> None:
     """Вычислить режим аутентификации и подготовить секрет сессий.
 
@@ -83,24 +98,18 @@ async def init_auth(dbase) -> None:
     недоступный keytab — ошибка запуска (fail-fast), а не тихое отключение.
     """
     global AUTH_MODE
-    keytab = config.KRB5_KEYTAB
-    keytab_ok = bool(keytab) and os.path.isfile(keytab) and os.access(keytab, os.R_OK)
-    if config.AUTH_MODE_SETTING == "kerberos":
-        if not keytab_ok:
-            raise RuntimeError(
-                "AUTH_MODE=kerberos: keytab недоступен или нечитаем: "
-                f"{keytab or 'KRB5_KTNAME не задан'}"
-            )
-        AUTH_MODE = "kerberos"
-    elif config.AUTH_MODE_SETTING == "auto":
-        AUTH_MODE = "kerberos" if keytab_ok else "off"
-    else:
-        AUTH_MODE = "off"
+    mode, keytab_ok = _resolve_auth()
+    if config.AUTH_MODE_SETTING == "kerberos" and not keytab_ok:
+        raise RuntimeError(
+            "AUTH_MODE=kerberos: keytab недоступен или нечитаем: "
+            f"{config.KRB5_KEYTAB or 'KRB5_KTNAME не задан'}"
+        )
+    AUTH_MODE = mode
     await session_secret(dbase)
     if AUTH_MODE == "kerberos":
         logger.info(
             "Аутентификация: Kerberos SSO; keytab=%s; principal=%s",
-            keytab,
+            config.KRB5_KEYTAB,
             config.KRB5_PRINCIPAL or "(первый из keytab)",
         )
     else:
@@ -232,3 +241,121 @@ async def require_admin(
         raise HTTPException(status_code=401, detail="Требуется вход администратора")
     if request.method not in {"GET", "HEAD", "OPTIONS"} and x_admin_request != "1":
         raise HTTPException(status_code=403, detail="Недопустимый запрос администратора")
+
+
+# ---- самопроверка для отладки на месте: python -m app.auth --check ----
+
+
+def _parse_krb5_conf(path: str) -> tuple[str | None, list[str]]:
+    """(default_realm, kdc-адреса его блока) из простого разбора krb5.conf."""
+    realm: str | None = None
+    kdcs_by_realm: dict[str, list[str]] = {}
+    current_realm: str | None = None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+    except OSError:
+        return None, []
+    section = ""
+    for raw in lines:
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip().lower()
+            current_realm = None
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip().lower()
+        value = value.strip()
+        if section == "libdefaults" and key == "default_realm" and realm is None:
+            realm = value
+        elif section == "realms":
+            if not value and line.endswith("{"):
+                current_realm = key
+                kdcs_by_realm.setdefault(current_realm, [])
+            elif key == "kdc" and current_realm:
+                kdcs_by_realm[current_realm].append(value)
+    if realm and realm in kdcs_by_realm:
+        return realm, kdcs_by_realm[realm]
+    all_kdcs = [kdc for hosts in kdcs_by_realm.values() for kdc in hosts]
+    return realm, all_kdcs
+
+
+def _cli_check() -> int:
+    """Напечатать по-русски состояние Kerberos-пути; 0 — ок, 1 — проблемы."""
+    import socket
+
+    mode, keytab_ok = _resolve_auth()
+    setting = config.AUTH_MODE_SETTING
+    print(f"Настройка AUTH_MODE: {setting}")
+    print(f"KRB5_KTNAME: {config.KRB5_KEYTAB or '(не задан)'}")
+    print(f"KRB5_PRINCIPAL: {config.KRB5_PRINCIPAL or '(из keytab)'}")
+
+    if setting == "kerberos" and not keytab_ok:
+        print(
+            "ПРОБЛЕМА: AUTH_MODE=kerberos, но keytab недоступен или нечитаем — "
+            "приложение не запустится (fail-fast)."
+        )
+        return 1
+
+    if mode == "off":
+        print("Аутентификация выключена (режим off): вход не требуется.")
+        return 0
+
+    print(f"Режим: kerberos")
+    if keytab_ok:
+        print(f"Keytab: читается ({config.KRB5_KEYTAB})")
+    else:
+        print("ПРОБЛЕМА: keytab недоступен.")
+        return 1
+
+    realm, kdcs = _parse_krb5_conf("/etc/krb5.conf")
+    print(f"Realm (krb5.conf): {realm or '(не найден)'}")
+    if not kdcs:
+        print("ПРОБЛЕМА: KDC не найдены в /etc/krb5.conf (см. deploy/krb5.conf.example).")
+        return 1
+
+    problems = False
+    for kdc in kdcs:
+        host = kdc.split(":", 1)[0]
+        port = 88
+        if ":" in kdc and not kdc.count(":") > 1:  # «хост:порт»
+            try:
+                port = int(kdc.split(":", 1)[1])
+            except ValueError:
+                pass
+        try:
+            with socket.create_connection((host, port), timeout=3):
+                print(f"KDC {kdc}: доступен (TCP {port})")
+        except OSError as exc:
+            problems = True
+            print(f"ПРОБЛЕМА: KDC {kdc} недоступен ({exc})")
+
+    try:
+        import gssapi  # лениво: на Windows-разработке не установлен
+    except ImportError:
+        print("ПРОБЛЕМА: модуль gssapi недоступен в образе.")
+        return 1
+    try:
+        name = None
+        if config.KRB5_PRINCIPAL:
+            name = gssapi.Name(
+                config.KRB5_PRINCIPAL, gssapi.NameType.kerberos_principal
+            )
+        gssapi.Credentials(usage="accept", name=name)
+        print("Акцептор-учётные данные: получены из keytab.")
+    except Exception as exc:  # noqa: BLE001 — диагностика печатает любую причину
+        problems = True
+        print(f"ПРОБЛЕМА: акцептор-учётные данные не получены: {exc}")
+
+    return 1 if problems else 0
+
+
+if __name__ == "__main__":
+    import sys
+
+    if "--check" in sys.argv[1:]:
+        sys.exit(_cli_check())
+    print("Использование: python -m app.auth --check")
+    sys.exit(2)
