@@ -240,40 +240,37 @@ async def check_logout():
             await database.close()
 
 
-def check_cli_off_mode():
+def _run_auth_check(env_overrides: dict[str, str]):
     import subprocess
 
     env = dict(os.environ)
     env.pop("KRB5_KTNAME", None)
-    env["AUTH_MODE"] = "auto"
-    result = subprocess.run(
+    env.update(env_overrides)
+    # Детерминированная кодировка дочернего процесса независимо от -X utf8
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    return subprocess.run(
         [sys.executable, "-m", "app.auth", "--check"],
         cwd="backend",
         env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=60,
     )
-    output = result.stdout + result.stderr
+
+
+def check_cli_off_mode():
+    result = _run_auth_check({"AUTH_MODE": "auto"})
+    output = (result.stdout or "") + (result.stderr or "")
     assert result.returncode == 0, output
     assert "выключена" in output, output
 
 
 def check_cli_kerberos_missing_keytab():
-    import subprocess
-
-    env = dict(os.environ)
-    env["AUTH_MODE"] = "kerberos"
-    env["KRB5_KTNAME"] = "/нет/такого"
-    result = subprocess.run(
-        [sys.executable, "-m", "app.auth", "--check"],
-        cwd="backend",
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    output = result.stdout + result.stderr
+    result = _run_auth_check({"AUTH_MODE": "kerberos", "KRB5_KTNAME": "/нет/такого"})
+    output = (result.stdout or "") + (result.stderr or "")
     assert result.returncode == 1, output
     assert "keytab" in output.lower(), output
 
