@@ -790,6 +790,48 @@ async def check_stop_during_error_save():
         restore()
 
 
+async def check_register_rollback_on_save_failure():
+    """Сбой записи вопроса не оставляет запуск без задачи — чат не «занят».
+
+    register() происходит до сохранения вопроса; если запись падает,
+    запуск надо убрать из реестра, иначе все новые POST получают 409,
+    а остановить такой запуск нельзя (задачи нет).
+    """
+    restore = install_pipeline([("event", FINAL)])
+    try:
+        async with app_env() as (database, client):
+            orig_add = database.add_message
+
+            async def failing_user_add(chat_id, role, content):
+                if role == "user":
+                    raise sqlite3.OperationalError("database is locked")
+                return await orig_add(chat_id, role, content)
+
+            database.add_message = failing_user_add
+
+            chat_id = await make_chat(client)
+            try:
+                failed = await client.post(
+                    f"/api/chats/{chat_id}/messages", json={"content": "вопрос"}
+                )
+                assert failed.status_code == 500, failed.text
+            except sqlite3.OperationalError:
+                pass  # ASGITransport поднимает исключение приложения вместо 500
+
+            # реестр не держит запуск без задачи — чат не «занят»
+            assert main.runs_registry.active_run_id(chat_id) is None
+
+            database.add_message = orig_add
+            retry = await client.post(
+                f"/api/chats/{chat_id}/messages", json={"content": "снова"}
+            )
+            assert retry.status_code == 202, retry.text
+            messages = await wait_for_answer(database, chat_id)
+            assert messages[-1]["content"] == "готовый ответ", messages
+    finally:
+        restore()
+
+
 async def check_delete_chat_stops_run():
     gate = asyncio.Event()
     restore = install_pipeline([("wait", gate), ("event", FINAL)])
@@ -906,6 +948,7 @@ asyncio.run(check_stop_run())
 asyncio.run(check_stop_finished_404())
 asyncio.run(check_stop_during_save())
 asyncio.run(check_stop_during_error_save())
+asyncio.run(check_register_rollback_on_save_failure())
 asyncio.run(check_delete_chat_stops_run())
 asyncio.run(check_delete_chat_during_save())
 asyncio.run(check_shutdown_cancels_runs())

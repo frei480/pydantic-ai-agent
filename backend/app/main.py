@@ -692,10 +692,15 @@ async def post_message(
         ) from None
 
     # Сохраняем сообщение пользователя и задаём заголовок чата по первому сообщению.
-    await dbase.add_message(chat_id, "user", content)
-    if chat["title"] == "Новый чат":
-        await dbase.rename_chat(chat_id, content[:60])
-        chat["title"] = content[:60]
+    try:
+        await dbase.add_message(chat_id, "user", content)
+        if chat["title"] == "Новый чат":
+            await dbase.rename_chat(chat_id, content[:60])
+            chat["title"] = content[:60]
+    except Exception:
+        # вопрос не сохранён — запуск не начинать, чат не «занят»
+        runs_registry.discard(run)
+        raise
 
     run.task = asyncio.create_task(
         _execute_run(run, chat_id, content, chat.get("history_json", ""))

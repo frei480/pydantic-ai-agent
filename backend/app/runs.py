@@ -88,6 +88,14 @@ class RunRegistry:
     def get(self, run_id: str) -> Run | None:
         return self._runs.get(run_id)
 
+    def discard(self, run: Run) -> None:
+        """Убрать запуск, не начавшийся (сбой до старта задачи).
+
+        Задачи у такого запуска нет — cancel() его не завершит, а чат
+        он держит занятым. Вызывается при сбое сохранения вопроса.
+        """
+        self._runs.pop(run.id, None)
+
     def active_run_id(self, chat_id: int) -> str | None:
         for run in self._runs.values():
             if run.chat_id == chat_id and run.is_running:
