@@ -802,8 +802,12 @@ function App() {
       setCurrentTitle(started.chat.title || content.slice(0, 60));
       setMessages((current) => [...current, { role: "user", content }, { role: "assistant", content: "" }]);
       setRunId(started.run_id);
-      await loadChats();
+      // подписка — до всего необязательного: сбой обновления списка чатов
+      // не должен оставлять вкладку «занятой» без потока событий
       void connectRun(chatId, started.run_id);
+      await loadChats().catch(() => {
+        // список обновит опрос или следующее действие пользователя
+      });
     } catch (sendError) {
       setError(errorMessage(sendError));
     } finally {
