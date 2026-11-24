@@ -93,6 +93,16 @@ try:
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=120) as resp:
+        assert resp.status == 202, resp.status
+        started = json.loads(resp.read())
+        run_id = started["run_id"]
+        print("run started:", run_id)
+
+    # события — догоняющим GET-потоком (реплей накопленных + новые)
+    with urllib.request.urlopen(
+        f"{base_url}/api/chats/{chat['id']}/runs/{run_id}/events?from=0",
+        timeout=120,
+    ) as resp:
         ct = resp.headers.get("Content-Type")
         print("content-type:", ct)
         assert "event-stream" in ct
@@ -105,6 +115,7 @@ try:
     print("event types:", types[:10], "…total", len(types))
     # финальный текст стримится как text; final в SSE не отсылается, он сохраняется в БД
     assert "done" in types and "text" in types, events
+    assert all("seq" in e for e in events), events
 
     msgs = json.loads(
         urllib.request.urlopen(

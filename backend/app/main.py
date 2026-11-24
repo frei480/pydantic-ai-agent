@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.openapi.docs import (
     get_redoc_html,
     get_swagger_ui_html,
@@ -18,7 +18,7 @@ from fastapi.openapi.docs import (
 from fastapi.responses import StreamingResponse
 from openai import APIError
 
-from . import agent, auth, db, llm_errors
+from . import agent, auth, db, llm_errors, runs
 from .admin_content import AdminContentStore, skill_metadata
 from .auth import (
     ADMIN_COOKIE_NAME,
@@ -49,6 +49,7 @@ from .model import (
     MessageIn,
     ModelHealthOut,
     ModelSettingsIn,
+    RunStartedOut,
     SkillContentIn,
     SkillOut,
     SkillSummaryOut,
@@ -57,6 +58,7 @@ from .model import (
 )
 
 dbase = db.Database(str(DB_PATH))
+runs_registry = runs.RunRegistry()
 admin_content = AdminContentStore(DB_PATH.parent)
 logger = logging.getLogger(__name__)
 MODEL_HEALTH_CACHE_TTL = 60 * 60
@@ -169,6 +171,7 @@ def _chat_out(chat: ChatSummary) -> ChatOut:
         "title": chat["title"],
         "created_at": chat["created_at"],
         "updated_at": chat["updated_at"],
+        "active_run": runs_registry.active_run_id(chat["id"]),
     }
 
 
@@ -597,15 +600,77 @@ async def get_messages(
     }
 
 
-@app.post("/api/chats/{chat_id}/messages")
+async def _execute_run(
+    run: runs.Run, chat_id: int, content: str, history_json: str
+) -> None:
+    """Фоновая задача запуска: пайплайн пишет события в run, ответ — в базу.
+
+    Живёт независимо от соединений: обрыв подписки её не отменяет.
+    """
+    final_text = ""
+    partial_text = ""
+    # последняя фаза пайплайна — попадает в контекст записи об ошибке LLM
+    current_phase = ""
+    try:
+        async for event in agent.run_pipeline(content, history_json):
+            if event["type"] == "final":
+                text = event.get("text")
+                history = event.get("history_json")
+                if not isinstance(text, str) or not isinstance(history, str):
+                    raise RuntimeError("pipeline returned an invalid final event")
+                final_text = text
+                history_json = history
+                continue
+            if event["type"] == "phase":
+                current_phase = str(event.get("phase", ""))
+            if event["type"] == "text":
+                partial_text += str(event.get("text", ""))
+            run.publish(event)
+    except asyncio.CancelledError:
+        if run.finishing:
+            # отмена пришла из остановки сервера в окне записи — не спасаем
+            raise
+        run.finish("cancelled")
+        return
+    except Exception as exc:  # noqa: BLE001 — наружу клиенту только краткость
+        # полный дамп ошибки и последнего запроса — в файл лога, клиенту — краткость
+        llm_errors.log_llm_failure(
+            exc, context={"chat_id": chat_id, "phase": current_phase}
+        )
+        brief = _provider_error_message(exc)
+        saved = (
+            f"{partial_text}\n\n**Ошибка:** {brief}"
+            if partial_text
+            else f"**Ошибка:** {brief}"
+        )
+        await dbase.add_message(chat_id, "assistant", saved)
+        run.finish("error", message=brief)
+        return
+    # окно записи: отмена больше не действует (см. Run.begin_finish)
+    run.begin_finish()
+    if final_text:
+        await dbase.add_message(chat_id, "assistant", final_text)
+        await dbase.set_history(chat_id, json.loads(history_json))
+    run.finish("done")
+
+
+@app.post("/api/chats/{chat_id}/messages", status_code=202)
 async def post_message(
     chat_id: int, body: MessageIn, login: str = Depends(auth.require_user)
-) -> StreamingResponse:
-    """Отправить сообщение пользователя в чат; ответ агента приходит потоком SSE."""
+) -> RunStartedOut:
+    """Запустить обработку сообщения; события — догоняющим потоком GET runs."""
     content = body.content.strip()
     if not content:
         raise HTTPException(status_code=400, detail="Пустое сообщение")
     chat = await chat_for(login, chat_id)
+
+    runs_registry.reap()
+    try:
+        run = runs_registry.register(chat_id)
+    except runs.ChatBusyError:
+        raise HTTPException(
+            status_code=409, detail="Агент ещё обрабатывает предыдущее сообщение"
+        ) from None
 
     # Сохраняем сообщение пользователя и задаём заголовок чата по первому сообщению.
     await dbase.add_message(chat_id, "user", content)
@@ -613,39 +678,36 @@ async def post_message(
         await dbase.rename_chat(chat_id, content[:60])
         chat["title"] = content[:60]
 
-    async def event_stream() -> AsyncIterator[str]:
-        yield _sse({"type": "start", "chat": _chat_out(chat)})
-        final_text = ""
-        history_json = chat.get("history_json", "")
-        # последняя фаза пайплайна — попадает в контекст записи об ошибке LLM
-        current_phase = ""
-        try:
-            async for event in agent.run_pipeline(content, history_json):
-                if event["type"] == "final":
-                    text = event.get("text")
-                    history = event.get("history_json")
-                    if not isinstance(text, str) or not isinstance(history, str):
-                        raise RuntimeError("pipeline returned an invalid final event")
-                    final_text = text
-                    history_json = history
-                    continue
-                if event["type"] == "phase":
-                    current_phase = str(event.get("phase", ""))
-                yield _sse(event)
-        except Exception as exc:  # noqa: BLE001 — наружу клиенту только краткость
-            # полный дамп ошибки и последнего запроса — в файл лога, клиенту — краткость
-            llm_errors.log_llm_failure(
-                exc, context={"chat_id": chat_id, "phase": current_phase}
-            )
-            yield _sse({"type": "error", "message": _provider_error_message(exc)})
-            return
-        if final_text:
-            await dbase.add_message(chat_id, "assistant", final_text)
-            await dbase.set_history(chat_id, json.loads(history_json))
-        yield _sse({"type": "done"})
+    run.task = asyncio.create_task(
+        _execute_run(run, chat_id, content, chat.get("history_json", ""))
+    )
+    return RunStartedOut(run_id=run.id, chat=_chat_out(chat))
 
+
+async def _run_sse(run: runs.Run, from_seq: int) -> AsyncIterator[str]:
+    async for event in runs_registry.stream_events(run, from_seq):
+        if event["type"] == "heartbeat":
+            # комментарий-«сердцебиение»: nginx не закрывает соединение на паузе
+            yield ": keep-alive\n\n"
+        else:
+            yield _sse(event)
+
+
+@app.get("/api/chats/{chat_id}/runs/{run_id}/events")
+async def get_run_events(
+    chat_id: int,
+    run_id: str,
+    from_: int = Query(0, alias="from"),
+    login: str = Depends(auth.require_user),
+) -> StreamingResponse:
+    """SSE-поток событий запуска после номера from: накопленные, потом новые."""
+    await chat_for(login, chat_id)
+    runs_registry.reap()
+    run = runs_registry.get(run_id)
+    if run is None or run.chat_id != chat_id:
+        raise HTTPException(status_code=404, detail="run not found")
     return StreamingResponse(
-        event_stream(),
+        _run_sse(run, max(from_, 0)),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

@@ -55,6 +55,12 @@ class ChatOut(TypedDict):
     title: str
     created_at: str
     updated_at: str
+    active_run: str | None
+
+
+class RunStartedOut(TypedDict):
+    run_id: str
+    chat: ChatOut
 
 
 class HealthOut(TypedDict):

@@ -93,6 +93,15 @@ try:
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=120) as resp:
+        assert resp.status == 202, resp.status
+        run_id = json.loads(resp.read())["run_id"]
+        print("run started:", run_id)
+
+    # событие ошибки приходит догоняющим GET-потоком запуска
+    with urllib.request.urlopen(
+        f"{base_url}/api/chats/{chat_id}/runs/{run_id}/events?from=0",
+        timeout=120,
+    ) as resp:
         ct = resp.headers.get("Content-Type")
         assert "event-stream" in ct
         events = []
