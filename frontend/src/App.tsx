@@ -124,6 +124,12 @@ const suggestions = [
   },
 ];
 
+/** Возврат в идущий чат: ответа в базе ещё нет — показать пустой пузырь-заглушку. */
+function withAnswerStub(messages: ChatMessage[]): ChatMessage[] {
+  if (messages.at(-1)?.role === "assistant") return messages;
+  return [...messages, { role: "assistant", content: "" }];
+}
+
 const phaseLabels: Record<string, string> = {
   research: "Ищу в документации",
   critique: "Проверяю полноту",
@@ -374,7 +380,7 @@ function App() {
       const data = await api<{ chat: Chat; messages: ChatMessage[] }>(`/api/chats/${chatId}/messages`);
       if (currentIdRef.current !== chatId) return null;
       setCurrentTitle(data.chat.title);
-      setMessages(data.messages);
+      setMessages(data.chat.active_run ? withAnswerStub(data.messages) : data.messages);
       setRunId(data.chat.active_run ?? null);
       return data.chat.active_run ?? null;
     } catch (refreshError) {
@@ -477,19 +483,23 @@ function App() {
         }
         case "text":
           answerRef.current += event.text || "";
+          // после перезагрузки/возврата в чат пузыря ответа ещё нет — создать
           setMessages((current) => {
             const next = [...current];
             const last = next.at(-1);
             if (last?.role === "assistant") next[next.length - 1] = { ...last, content: answerRef.current };
+            else next.push({ role: "assistant", content: answerRef.current });
             return next;
           });
           break;
         case "error":
           answerRef.current += `${answerRef.current ? "\n\n" : ""}**Ошибка:** ${event.message || "Неизвестная ошибка"}`;
+          // после перезагрузки/возврата в чат пузыря ответа ещё нет — создать
           setMessages((current) => {
             const next = [...current];
             const last = next.at(-1);
             if (last?.role === "assistant") next[next.length - 1] = { ...last, content: answerRef.current };
+            else next.push({ role: "assistant", content: answerRef.current });
             return next;
           });
           return "terminal";
@@ -604,7 +614,7 @@ function App() {
       const data = await api<{ chat: Chat; messages: ChatMessage[] }>(`/api/chats/${chatId}/messages`);
       if (currentIdRef.current !== chatId) return true;
       setCurrentTitle(data.chat.title);
-      setMessages(data.messages);
+      setMessages(data.chat.active_run ? withAnswerStub(data.messages) : data.messages);
       if (data.chat.active_run) {
         setRunId(data.chat.active_run);
         void connectRun(chatId, data.chat.active_run);
