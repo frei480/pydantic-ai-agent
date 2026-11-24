@@ -348,6 +348,21 @@ function App() {
     return () => window.clearInterval(timer);
   }, [authState, checkHealth, loadChats]);
 
+  // пока в списке есть чат с идущим запуском — обновлять список каждые 10 с
+  useEffect(() => {
+    if (authState !== "ok" || !chats.some((chat) => chat.active_run)) return;
+    const timer = window.setInterval(() => void loadChats(), 10_000);
+    return () => window.clearInterval(timer);
+  }, [authState, chats, loadChats]);
+
+  // сразу при возврате на вкладку
+  useEffect(() => {
+    if (authState !== "ok") return;
+    const refresh = () => void loadChats();
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, [authState, loadChats]);
+
   const addActivity = (activity: Omit<Activity, "id">) => {
     setActivities((current) => [...current, { ...activity, id: ++activityId.current }]);
   };
@@ -909,6 +924,14 @@ function App() {
                   className="flex min-w-0 flex-1 items-center gap-2.5 px-3 py-2.5 text-left"
                 >
                   <MessageSquare size={14} className="shrink-0 opacity-65" />
+                  {chat.active_run && (
+                    <span
+                      role="status"
+                      aria-label="Идёт обработка"
+                      title="Идёт обработка"
+                      className="h-1.5 w-1.5 shrink-0 rounded-full bg-blue-500 pulse-dot"
+                    />
+                  )}
                   <span className="min-w-0 flex-1 truncate">{chat.title}</span>
                 </button>
                 <button
