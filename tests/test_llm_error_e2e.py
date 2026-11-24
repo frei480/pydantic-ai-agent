@@ -122,6 +122,16 @@ try:
     assert "[ПОСЛЕДНИЙ ЗАПРОС К МОДЕЛИ]" in log_content, log_content[:2000]
     assert "mock-model" in log_content, log_content[:2000]
     assert f"chat_id={chat_id}" in log_content, log_content[:2000]
+
+    # краткая ошибка сохраняется в чате как ответ (спека: «в чат как ответ
+    # сохраняются уже показанный текст и краткая ошибка»)
+    with urllib.request.urlopen(
+        f"{base_url}/api/chats/{chat_id}/messages", timeout=30
+    ) as resp:
+        saved = json.loads(resp.read())["messages"]
+    assert saved and saved[-1]["role"] == "assistant", saved
+    assert "**Ошибка:**" in saved[-1]["content"], saved[-1]
+    assert "MOCK-FAIL-ALL-MARKER" in saved[-1]["content"], saved[-1]
     print("LLM-ERROR-E2E-OK")
 finally:
     for proc in (server, mock):

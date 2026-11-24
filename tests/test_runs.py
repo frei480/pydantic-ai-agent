@@ -572,6 +572,12 @@ async def check_rights_runs_routes():
                 f"/api/chats/{chat_id}/runs/{run_id}/events?from=0"
             )
             assert foreign_events.status_code == 404, foreign_events.text
+            # остановка чужого запуска — тоже 404 (спека: «чужой чат → 404»
+            # для отправки, потока и остановки)
+            foreign_stop = await client.delete(
+                f"/api/chats/{chat_id}/runs/{run_id}"
+            )
+            assert foreign_stop.status_code == 404, foreign_stop.text
 
             gate.set()
             run = main.runs_registry.get(run_id)
