@@ -12,6 +12,7 @@ import {
   MessageSquare,
   Plus,
   Save,
+  Square,
   Settings2,
   Sparkles,
   Trash2,
@@ -34,6 +35,7 @@ type Chat = {
   title: string;
   created_at: string;
   updated_at: string;
+  active_run?: string | null;
 };
 
 type ChatMessage = {
@@ -63,6 +65,7 @@ type StreamEvent = {
   comments?: string;
   missing?: string[];
   chat?: Chat;
+  seq?: number;
 };
 
 type Provider = "openai" | "openrouter" | "ollama" | "lmstudio" | "custom";
@@ -156,9 +159,23 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       // Non-JSON error responses use the HTTP status as their message.
     }
-    throw new Error(detail);
+    const error = new Error(detail);
+    (error as Error & { status?: number }).status = response.status;
+    throw error;
   }
   return response.json() as Promise<T>;
+}
+
+async function apiStream(path: string, init?: RequestInit): Promise<Response> {
+  // Тот же повтор при 401, что у api(), но возвращает Response — для SSE.
+  let response = await fetch(path, init);
+  if (response.status === 401 && refreshSession) {
+    const session = await refreshSession();
+    if (session) {
+      response = await fetch(path, init);
+    }
+  }
+  return response;
 }
 
 function parseEvent(chunk: string): StreamEvent | null {
@@ -195,7 +212,8 @@ function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [activities, setActivities] = useState<Activity[]>([]);
   const [input, setInput] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [runId, setRunId] = useState<string | null>(null);
   const [status, setStatus] = useState("");
   const [backendHealth, setBackendHealth] = useState<ServiceHealth>("checking");
   const [modelHealth, setModelHealth] = useState<ServiceHealth>("checking");
@@ -223,6 +241,18 @@ function App() {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const activityId = useRef(0);
   const healthCheckRunning = useRef(false);
+  // Подписка на фоновый запуск открытого чата.
+  const currentIdRef = useRef<number | null>(null);
+  const runSeq = useRef(0);
+  const runAbort = useRef<AbortController | null>(null);
+  const retryTimer = useRef(0);
+  const retryDelay = useRef(1000);
+  const connectedRunRef = useRef<string | null>(null);
+  const connectRunRef = useRef<((chatId: number, runId: string) => Promise<void>) | null>(null);
+
+  // отправка в полёте ИЛИ в открытом чате идёт запуск — ввод заблокирован
+  const busy = sending || runId !== null;
+  currentIdRef.current = currentId;
 
   const scrollBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -322,33 +352,269 @@ function App() {
     setActivities((current) => [...current, { ...activity, id: ++activityId.current }]);
   };
 
-  const selectChat = async (chat: Chat) => {
-    if (busy) return;
-    setError("");
-    setCurrentId(chat.id);
-    setCurrentTitle(chat.title);
-    setMessages([]);
-    setActivities([]);
-    setSidebarOpen(false);
+  const refreshChatState = useCallback(async (chatId: number): Promise<string | null> => {
+    /** Перечитать сообщения чата; вернуть его active_run (или null). */
     try {
-      const data = await api<{ chat: Chat; messages: ChatMessage[] }>(`/api/chats/${chat.id}/messages`);
+      const data = await api<{ chat: Chat; messages: ChatMessage[] }>(`/api/chats/${chatId}/messages`);
+      if (currentIdRef.current !== chatId) return null;
       setCurrentTitle(data.chat.title);
       setMessages(data.messages);
+      setRunId(data.chat.active_run ?? null);
+      return data.chat.active_run ?? null;
+    } catch (refreshError) {
+      // чат исчез или сеть подвела: не оставлять «вечную занятость»
+      if (currentIdRef.current === chatId) {
+        setRunId(null);
+        setError(`Чат недоступен: ${errorMessage(refreshError)}`);
+      }
+      return null;
+    }
+  }, []);
+
+  const finishRun = useCallback(async (chatId: number) => {
+    /** Завершающее событие: показанное делаем равным сохранённому. */
+    setRunId(null);
+    setStatus("");
+    try {
+      const data = await api<{ chat: Chat; messages: ChatMessage[] }>(`/api/chats/${chatId}/messages`);
+      if (currentIdRef.current === chatId) {
+        setCurrentTitle(data.chat.title);
+        setMessages(data.messages);
+      }
+      await loadChats();
+    } catch {
+      // следующий опрос или действие пользователя обновит список
+    }
+    inputRef.current?.focus();
+  }, [loadChats]);
+
+  const connectRun = useCallback(async (chatId: number, runId: string) => {
+    /** Подписка на события запуска: реплей с runSeq, потом живые. */
+    if (currentIdRef.current !== chatId) return;
+    if (connectedRunRef.current !== runId) {
+      // новое подключение (не переподключение) — с начала
+      runSeq.current = 0;
+      connectedRunRef.current = runId;
+    }
+    const controller = new AbortController();
+    runAbort.current?.abort();
+    runAbort.current = controller;
+
+    let answer = "";
+    let draftSeen = false;
+    const handleEvent = (event: StreamEvent): "terminal" | undefined => {
+      if (event.seq !== undefined) runSeq.current = Math.max(runSeq.current, event.seq);
+      switch (event.type) {
+        case "phase": {
+          const label = phaseLabels[event.phase || ""] || "Обрабатываю запрос";
+          setStatus(event.round && event.round > 1 ? `${label} · итерация ${event.round}` : label);
+          if (event.phase === "research") addActivity({ kind: "phase", text: "Ищу в документации…" });
+          if (event.phase === "write") setStatus(phaseLabels.write);
+          break;
+        }
+        case "tool":
+          addActivity({ kind: "tool", text: event.detail || "Вызван инструмент поиска" });
+          break;
+        case "agent": {
+          const agentLabels: Record<string, string> = {
+            tflex_docs_researcher: "T-FLEX DOCs",
+            tflex_cad_document_researcher: "T-FLEX CAD · документ",
+            tflex_cad_2d_researcher: "T-FLEX CAD · 2D",
+            tflex_cad_3d_researcher: "T-FLEX CAD · 3D",
+          };
+          const agent = event.agent_name || "неизвестный";
+          addActivity({
+            kind: "agent",
+            text: `Запущен субагент «${agentLabels[agent] || agent}»${event.task ? `: ${event.task}` : ""}`,
+          });
+          break;
+        }
+        case "skill":
+          if (event.skill_name) {
+            const actor = event.agent_name
+              ? ` · субагент ${event.agent_name}`
+              : event.phase === "write"
+                ? " · писатель"
+                : " · исследователь";
+            addActivity({
+              kind: "skill",
+              text: `Загружен навык «${event.skill_name}»${actor}`,
+            });
+          }
+          break;
+        case "draft":
+          if (!draftSeen) {
+            draftSeen = true;
+            addActivity({ kind: "draft", text: "Исследователь собирает факты…" });
+          }
+          break;
+        case "critique": {
+          const missing = (event.missing || []).slice(0, 3).join("; ");
+          addActivity({
+            kind: "critique",
+            text: event.comments || missing || (event.sufficient ? "Данных достаточно" : "Нужно уточнить поиск"),
+            sufficient: event.sufficient,
+          });
+          break;
+        }
+        case "text":
+          answer += event.text || "";
+          setMessages((current) => {
+            const next = [...current];
+            const last = next.at(-1);
+            if (last?.role === "assistant") next[next.length - 1] = { ...last, content: answer };
+            return next;
+          });
+          break;
+        case "error":
+          answer += `${answer ? "\n\n" : ""}**Ошибка:** ${event.message || "Неизвестная ошибка"}`;
+          setMessages((current) => {
+            const next = [...current];
+            const last = next.at(-1);
+            if (last?.role === "assistant") next[next.length - 1] = { ...last, content: answer };
+            return next;
+          });
+          return "terminal";
+        case "warning":
+          addActivity({
+            kind: "warning",
+            text: event.message || "Контекст запроса был сокращён.",
+          });
+          break;
+        case "done":
+        case "cancelled":
+          return "terminal";
+        default:
+          break;
+      }
+      return undefined;
+    };
+
+    let terminal = false;
+    try {
+      while (!controller.signal.aborted) {
+        let response: Response;
+        try {
+          response = await apiStream(
+            `/api/chats/${chatId}/runs/${runId}/events?from=${runSeq.current}`,
+            { cache: "no-store", signal: controller.signal },
+          );
+        } catch {
+          break; // сеть — на повтор ниже
+        }
+        if (response.status === 404) {
+          // запуск исчез (завершён и стёрт) — перечитать состояние чата
+          const active = await refreshChatState(chatId);
+          if (active) void connectRunRef.current?.(chatId, active);
+          return;
+        }
+        if (!response.ok || !response.body) break;
+        try {
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            let boundary = buffer.indexOf("\n\n");
+            while (boundary !== -1) {
+              const chunk = buffer.slice(0, boundary);
+              buffer = buffer.slice(boundary + 2);
+              const parsed = parseEvent(chunk);
+              if (parsed && handleEvent(parsed) === "terminal") {
+                terminal = true;
+                break;
+              }
+              boundary = buffer.indexOf("\n\n");
+            }
+            if (terminal) break;
+          }
+        } catch {
+          // обрыв чтения — на повтор ниже
+        }
+        if (terminal) {
+          retryDelay.current = 1000;
+          await finishRun(chatId);
+          return;
+        }
+        if (controller.signal.aborted) return;
+        break; // поток закрылся без завершающего события — переподключиться
+      }
+    } finally {
+      if (runAbort.current === controller) runAbort.current = null;
+    }
+    if (controller.signal.aborted || runAbort.current) return;
+    // обрыв связи: повтор через секунду, пауза растёт до 10 секунд
+    const delay = retryDelay.current;
+    retryDelay.current = Math.min(retryDelay.current * 2, 10_000);
+    retryTimer.current = window.setTimeout(() => {
+      void connectRunRef.current?.(chatId, runId);
+    }, delay);
+  }, [finishRun, refreshChatState]);
+
+  connectRunRef.current = connectRun;
+
+  const abortRunSubscription = () => {
+    runAbort.current?.abort();
+    runAbort.current = null;
+    if (retryTimer.current) {
+      window.clearTimeout(retryTimer.current);
+      retryTimer.current = 0;
+    }
+    connectedRunRef.current = null;
+    runSeq.current = 0;
+  };
+
+  const openChat = useCallback(async (chatId: number | null) => {
+    /** Единая точка открытия: прервать подписку → сообщения → активный запуск. */
+    abortRunSubscription();
+    setError("");
+    setActivities([]);
+    setStatus("");
+    setCurrentId(chatId);
+    currentIdRef.current = chatId;
+    setSidebarOpen(false);
+    if (chatId === null) {
+      setCurrentTitle("Новый чат");
+      setMessages([]);
+      setRunId(null);
+      inputRef.current?.focus();
+      return;
+    }
+    try {
+      const data = await api<{ chat: Chat; messages: ChatMessage[] }>(`/api/chats/${chatId}/messages`);
+      if (currentIdRef.current !== chatId) return;
+      setCurrentTitle(data.chat.title);
+      setMessages(data.messages);
+      if (data.chat.active_run) {
+        setRunId(data.chat.active_run);
+        void connectRun(chatId, data.chat.active_run);
+      } else {
+        setRunId(null);
+      }
     } catch (loadError) {
+      setRunId(null);
       setError(`Не удалось открыть чат: ${errorMessage(loadError)}`);
     }
+  }, [connectRun]);
+
+  const selectChat = (chat: Chat) => {
+    void openChat(chat.id);
   };
 
   const startNewChat = () => {
-    if (busy) return;
-    setCurrentId(null);
-    setCurrentTitle("Новый чат");
-    setMessages([]);
-    setActivities([]);
-    setStatus("");
-    setError("");
-    setSidebarOpen(false);
-    inputRef.current?.focus();
+    void openChat(null);
+  };
+
+  const stopRun = async () => {
+    const chatId = currentIdRef.current;
+    if (chatId === null || !runId) return;
+    try {
+      await api(`/api/chats/${chatId}/runs/${runId}`, { method: "DELETE" });
+    } catch {
+      // 404 «уже завершён» и прочее: терминальное событие принесёт поток
+    }
   };
 
   const openSettings = async () => {
@@ -426,7 +692,7 @@ function App() {
 
   const deleteChat = async (event: MouseEvent<HTMLButtonElement>, chat: Chat) => {
     event.stopPropagation();
-    if (busy || !window.confirm("Удалить чат?")) return;
+    if (!window.confirm("Удалить чат?")) return;
     setError("");
     try {
       await api(`/api/chats/${chat.id}`, { method: "DELETE" });
@@ -442,10 +708,9 @@ function App() {
     const content = input.trim();
     if (!content || busy) return;
 
-    setInput("");
     setError("");
     setActivities([]);
-    setBusy(true);
+    setSending(true);
     let chatId = currentId;
     try {
       if (chatId === null) {
@@ -456,16 +721,21 @@ function App() {
         });
         chatId = chat.id;
         setCurrentId(chat.id);
+        currentIdRef.current = chat.id;
       }
 
-      await loadChats();
-      setCurrentTitle(content.slice(0, 60));
-      setMessages((current) => [...current, { role: "user", content }, { role: "assistant", content: "" }]);
-      const response = await fetch(`/api/chats/${chatId}/messages`, {
+      const response = await apiStream(`/api/chats/${chatId}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content }),
       });
+      if (response.status === 409) {
+        // чат занят: текст возвращается в поле, вкладка подключается к идущему
+        setInput(content);
+        const active = await refreshChatState(chatId);
+        if (active) void connectRun(chatId, active);
+        return;
+      }
       if (!response.ok) {
         let detail = "Ошибка сервера";
         try {
@@ -476,132 +746,17 @@ function App() {
         }
         throw new Error(detail);
       }
-      if (!response.body) throw new Error("Сервер не вернул поток ответа");
-
-      let answer = "";
-      let buffer = "";
-      let draftSeen = false;
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      const handleEvent = (event: StreamEvent) => {
-        switch (event.type) {
-          case "start":
-            if (event.chat?.title) setCurrentTitle(event.chat.title);
-            break;
-          case "phase": {
-            const label = phaseLabels[event.phase || ""] || "Обрабатываю запрос";
-            setStatus(event.round && event.round > 1 ? `${label} · итерация ${event.round}` : label);
-            if (event.phase === "research") addActivity({ kind: "phase", text: "Ищу в документации…" });
-            if (event.phase === "write") setStatus(phaseLabels.write);
-            break;
-          }
-          case "tool":
-            addActivity({ kind: "tool", text: event.detail || "Вызван инструмент поиска" });
-            break;
-          case "agent": {
-            const agentLabels: Record<string, string> = {
-              tflex_docs_researcher: "T-FLEX DOCs",
-              tflex_cad_document_researcher: "T-FLEX CAD · документ",
-              tflex_cad_2d_researcher: "T-FLEX CAD · 2D",
-              tflex_cad_3d_researcher: "T-FLEX CAD · 3D",
-            };
-            const agent = event.agent_name || "неизвестный";
-            addActivity({
-              kind: "agent",
-              text: `Запущен субагент «${agentLabels[agent] || agent}»${event.task ? `: ${event.task}` : ""}`,
-            });
-            break;
-          }
-          case "skill":
-            if (event.skill_name) {
-              const actor = event.agent_name
-                ? ` · субагент ${event.agent_name}`
-                : event.phase === "write"
-                  ? " · писатель"
-                  : " · исследователь";
-              addActivity({
-                kind: "skill",
-                text: `Загружен навык «${event.skill_name}»${actor}`,
-              });
-            }
-            break;
-          case "draft":
-            if (!draftSeen) {
-              draftSeen = true;
-              addActivity({ kind: "draft", text: "Исследователь собирает факты…" });
-            }
-            break;
-          case "critique": {
-            const missing = (event.missing || []).slice(0, 3).join("; ");
-            addActivity({
-              kind: "critique",
-              text: event.comments || missing || (event.sufficient ? "Данных достаточно" : "Нужно уточнить поиск"),
-              sufficient: event.sufficient,
-            });
-            break;
-          }
-          case "text":
-            answer += event.text || "";
-            setMessages((current) => {
-              const next = [...current];
-              const last = next.at(-1);
-              if (last?.role === "assistant") next[next.length - 1] = { ...last, content: answer };
-              return next;
-            });
-            break;
-          case "error":
-            answer += `${answer ? "\n\n" : ""}**Ошибка:** ${event.message || "Неизвестная ошибка"}`;
-            setMessages((current) => {
-              const next = [...current];
-              const last = next.at(-1);
-              if (last?.role === "assistant") next[next.length - 1] = { ...last, content: answer };
-              return next;
-            });
-            break;
-          case "warning":
-            addActivity({
-              kind: "warning",
-              text: event.message || "Контекст запроса был сокращён.",
-            });
-            break;
-          default:
-            break;
-        }
-      };
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        let boundary = buffer.indexOf("\n\n");
-        while (boundary !== -1) {
-          const chunk = buffer.slice(0, boundary);
-          buffer = buffer.slice(boundary + 2);
-          const parsed = parseEvent(chunk);
-          if (parsed) handleEvent(parsed);
-          boundary = buffer.indexOf("\n\n");
-        }
-      }
-      buffer += decoder.decode();
-      if (buffer.trim()) {
-        const parsed = parseEvent(buffer);
-        if (parsed) handleEvent(parsed);
-      }
-      setStatus("");
+      const started = (await response.json()) as { run_id: string; chat: Chat };
+      setInput("");
+      setCurrentTitle(started.chat.title || content.slice(0, 60));
+      setMessages((current) => [...current, { role: "user", content }, { role: "assistant", content: "" }]);
+      setRunId(started.run_id);
       await loadChats();
+      void connectRun(chatId, started.run_id);
     } catch (sendError) {
-      const message = errorMessage(sendError);
-      setError(message);
-      setMessages((current) => {
-        const last = current.at(-1);
-        if (last?.role === "assistant" && !last.content) {
-          return [...current.slice(0, -1), { ...last, content: `**Ошибка:** ${message}` }];
-        }
-        return current;
-      });
+      setError(errorMessage(sendError));
     } finally {
-      setBusy(false);
-      setStatus("");
+      setSending(false);
       inputRef.current?.focus();
     }
   };
@@ -701,8 +856,7 @@ function App() {
         <div className="px-3 pb-5">
           <button
             onClick={startNewChat}
-            disabled={busy}
-            className="flex w-full items-center gap-2.5 rounded-xl border border-slate-200 px-3.5 py-2.5 text-left text-[13px] font-medium text-slate-700 shadow-[0_1px_2px_rgba(15,23,42,0.03)] transition hover:border-blue-200 hover:bg-blue-50/60 hover:text-[#315fce] disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex w-full items-center gap-2.5 rounded-xl border border-slate-200 px-3.5 py-2.5 text-left text-[13px] font-medium text-slate-700 shadow-[0_1px_2px_rgba(15,23,42,0.03)] transition hover:border-blue-200 hover:bg-blue-50/60 hover:text-[#315fce]"
           >
             <Plus size={16} />
             Новый чат
@@ -905,6 +1059,11 @@ function App() {
                     </div>
                   </div>
                 ))}
+                {messages.length > 0 && messages.at(-1)?.role === "user" && !runId && (
+                  <div className="mx-auto mt-1 max-w-[820px] px-1 text-[11px] text-slate-400">
+                    Ответ не получен — отправьте сообщение ещё раз.
+                  </div>
+                )}
                 {activities.length > 0 && (
                   <div className="ml-11 -mt-2 max-w-[650px] overflow-hidden rounded-xl border border-slate-200/70 bg-white/80">
                     <details className="group">
@@ -982,15 +1141,27 @@ function App() {
                   <span className="hidden text-[10px] text-slate-400 sm:inline">
                     Enter — отправить · Shift + Enter — новая строка
                   </span>
-                  <button
-                    type="submit"
-                    disabled={busy || !input.trim()}
-                    aria-label="Отправить сообщение"
-                    title="Отправить"
-                    className="flex h-8 w-8 items-center justify-center rounded-[10px] bg-[#315fce] text-white transition hover:bg-[#244eaf] disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
-                  >
-                    {busy ? <LoaderCircle size={15} className="animate-spin" /> : <ArrowUp size={17} />}
-                  </button>
+                  {busy ? (
+                    <button
+                      type="button"
+                      onClick={() => void stopRun()}
+                      aria-label="Остановить"
+                      title="Остановить"
+                      className="flex h-8 w-8 items-center justify-center rounded-[10px] bg-slate-700 text-white transition hover:bg-slate-900"
+                    >
+                      <Square size={12} fill="currentColor" />
+                    </button>
+                  ) : (
+                    <button
+                      type="submit"
+                      disabled={!input.trim()}
+                      aria-label="Отправить сообщение"
+                      title="Отправить"
+                      className="flex h-8 w-8 items-center justify-center rounded-[10px] bg-[#315fce] text-white transition hover:bg-[#244eaf] disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
+                    >
+                      <ArrowUp size={17} />
+                    </button>
+                  )}
                 </div>
               </div>
             </form>
