@@ -248,6 +248,7 @@ function App() {
   const retryTimer = useRef(0);
   const retryDelay = useRef(1000);
   const connectedRunRef = useRef<string | null>(null);
+  const answerRef = useRef("");
   const connectRunRef = useRef<((chatId: number, runId: string) => Promise<void>) | null>(null);
 
   // отправка в полёте ИЛИ в открытом чате идёт запуск — ввод заблокирован
@@ -410,12 +411,14 @@ function App() {
       // новое подключение (не переподключение) — с начала
       runSeq.current = 0;
       connectedRunRef.current = runId;
+      answerRef.current = "";
     }
     const controller = new AbortController();
     runAbort.current?.abort();
     runAbort.current = controller;
 
-    let answer = "";
+    // накапливается в ref: переподключение продолжает показанный текст,
+    // а не стирает его пустой строкой
     let draftSeen = false;
     const handleEvent = (event: StreamEvent): "terminal" | undefined => {
       if (event.seq !== undefined) runSeq.current = Math.max(runSeq.current, event.seq);
@@ -473,20 +476,20 @@ function App() {
           break;
         }
         case "text":
-          answer += event.text || "";
+          answerRef.current += event.text || "";
           setMessages((current) => {
             const next = [...current];
             const last = next.at(-1);
-            if (last?.role === "assistant") next[next.length - 1] = { ...last, content: answer };
+            if (last?.role === "assistant") next[next.length - 1] = { ...last, content: answerRef.current };
             return next;
           });
           break;
         case "error":
-          answer += `${answer ? "\n\n" : ""}**Ошибка:** ${event.message || "Неизвестная ошибка"}`;
+          answerRef.current += `${answerRef.current ? "\n\n" : ""}**Ошибка:** ${event.message || "Неизвестная ошибка"}`;
           setMessages((current) => {
             const next = [...current];
             const last = next.at(-1);
-            if (last?.role === "assistant") next[next.length - 1] = { ...last, content: answer };
+            if (last?.role === "assistant") next[next.length - 1] = { ...last, content: answerRef.current };
             return next;
           });
           return "terminal";
