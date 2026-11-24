@@ -651,6 +651,9 @@ async def _execute_run(
         run.finish("cancelled")
         return
     except Exception as exc:  # noqa: BLE001 — наружу клиенту только краткость
+        # запись текста ошибки — та же запись ответа: отмена в этом окне
+        # не действует, иначе запуск зависает в статусе running
+        run.begin_finish()
         # полный дамп ошибки и последнего запроса — в файл лога, клиенту — краткость
         llm_errors.log_llm_failure(
             exc, context={"chat_id": chat_id, "phase": current_phase}

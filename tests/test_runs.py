@@ -728,6 +728,68 @@ async def check_stop_during_save():
         restore()
 
 
+async def check_stop_during_error_save():
+    """Остановка в окне записи сообщения об ошибке: 404, ошибка сохраняется, чат свободен.
+
+    Запись текста ошибки — та же «запись ответа»: отмена в этом окне не действует,
+    иначе запуск остаётся в статусе running и чат занят навсегда.
+    """
+    save_gate = asyncio.Event()
+    entered = asyncio.Event()
+    restore = install_pipeline([("raise", RuntimeError("провал провайдера"))])
+    try:
+        async with app_env() as (database, client):
+            orig_add = database.add_message
+
+            async def slow_error_add(chat_id, role, content):
+                if role == "assistant":
+                    entered.set()
+                    await save_gate.wait()
+                return await orig_add(chat_id, role, content)
+
+            database.add_message = slow_error_add
+
+            chat_id = await make_chat(client)
+            run_id = (
+                await client.post(
+                    f"/api/chats/{chat_id}/messages", json={"content": "вопрос"}
+                )
+            ).json()["run_id"]
+            await asyncio.wait_for(entered.wait(), timeout=5)
+
+            # «Остановить» в окне записи ошибки — запуск уже завершается
+            response = await client.delete(f"/api/chats/{chat_id}/runs/{run_id}")
+            assert response.status_code == 404, response.text
+
+            save_gate.set()
+            run = main.runs_registry.get(run_id)
+            if run and run.task:
+                await asyncio.wait_for(asyncio.shield(run.task), timeout=5)
+            assert run is not None and run.status == "error", run and run.status
+
+            messages = await database.get_messages(chat_id)
+            assert messages[-1]["role"] == "assistant", messages
+            assert "**Ошибка:**" in messages[-1]["content"], messages
+            assert main.runs_registry.active_run_id(chat_id) is None
+
+            # чат не остаётся «занятым» навсегда
+            retry = await client.post(
+                f"/api/chats/{chat_id}/messages", json={"content": "снова"}
+            )
+            assert retry.status_code == 202, retry.text
+            # второй запуск тоже падает быстро — дождаться, не оставлять зомби
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if main.runs_registry.active_run_id(chat_id) is None:
+                    break
+                await asyncio.sleep(0.02)
+            else:
+                raise AssertionError("второй запуск не завершился после ошибки")
+    finally:
+        save_gate.set()
+        restore()
+
+
 async def check_delete_chat_stops_run():
     gate = asyncio.Event()
     restore = install_pipeline([("wait", gate), ("event", FINAL)])
@@ -843,6 +905,7 @@ asyncio.run(check_save_failure_finishes_run())
 asyncio.run(check_stop_run())
 asyncio.run(check_stop_finished_404())
 asyncio.run(check_stop_during_save())
+asyncio.run(check_stop_during_error_save())
 asyncio.run(check_delete_chat_stops_run())
 asyncio.run(check_delete_chat_during_save())
 asyncio.run(check_shutdown_cancels_runs())
