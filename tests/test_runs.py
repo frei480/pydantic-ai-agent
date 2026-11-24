@@ -3,6 +3,7 @@ import asyncio
 import contextlib
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import time
@@ -555,6 +556,63 @@ asyncio.run(check_active_run_in_list())
 asyncio.run(check_post_conflict())
 asyncio.run(check_concurrent_post_single_run())
 asyncio.run(check_error_saves_partial())
+async def check_save_failure_finishes_run():
+    """Сбой записи ответа не оставляет запуск зависшим (анти-цель «вечная занятость»)."""
+    restore = install_pipeline([("event", FINAL)])
+    try:
+        async with app_env() as (database, client):
+            orig_add = database.add_message
+
+            async def failing_add(chat_id, role, content):
+                if role == "assistant":
+                    raise sqlite3.OperationalError("database is locked")
+                return await orig_add(chat_id, role, content)
+
+            database.add_message = failing_add
+
+            chat_id = await make_chat(client)
+            run_id = (
+                await client.post(
+                    f"/api/chats/{chat_id}/messages", json={"content": "вопрос"}
+                )
+            ).json()["run_id"]
+
+            # запуск обязан завершиться ошибкой, а не зависнуть
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                run = main.runs_registry.get(run_id)
+                if run is not None and run.status != "running":
+                    break
+                await asyncio.sleep(0.02)
+            else:
+                raise AssertionError("запуск завис в статусе running после сбоя записи")
+
+            events = parse_sse(
+                (
+                    await client.get(
+                        f"/api/chats/{chat_id}/runs/{run_id}/events?from=0"
+                    )
+                ).text
+            )
+            assert events[-1]["type"] == "error", events
+            assert main.runs_registry.active_run_id(chat_id) is None
+
+            retry = await client.post(
+                f"/api/chats/{chat_id}/messages", json={"content": "снова"}
+            )
+            assert retry.status_code == 202, retry.text
+            # второй запуск тоже падает быстро — дождаться, не оставлять зомби
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if main.runs_registry.active_run_id(chat_id) is None:
+                    break
+                await asyncio.sleep(0.02)
+            else:
+                raise AssertionError("второй запуск не завершился после сбоя записи")
+    finally:
+        restore()
+
+
 async def check_stop_run():
     gate = asyncio.Event()
     restore = install_pipeline(
@@ -781,6 +839,7 @@ async def check_shutdown_cancels_runs():
 
 
 asyncio.run(check_rights_runs_routes())
+asyncio.run(check_save_failure_finishes_run())
 asyncio.run(check_stop_run())
 asyncio.run(check_stop_finished_404())
 asyncio.run(check_stop_during_save())

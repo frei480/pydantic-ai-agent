@@ -637,9 +637,16 @@ async def _execute_run(
             if event["type"] == "text":
                 partial_text += str(event.get("text", ""))
             run.publish(event)
+        # окно записи: отмена больше не действует (см. Run.begin_finish),
+        # но сбой самой записи не должен оставлять запуск зависшим
+        run.begin_finish()
+        if final_text:
+            await dbase.add_message(chat_id, "assistant", final_text)
+            await dbase.set_history(chat_id, json.loads(history_json))
     except asyncio.CancelledError:
         if run.finishing:
-            # отмена пришла из остановки сервера в окне записи — не спасаем
+            # cancel() не действует в окне записи: отмена сюда доходит
+            # только от остановки сервера — не спасаем
             raise
         run.finish("cancelled")
         return
@@ -654,14 +661,12 @@ async def _execute_run(
             if partial_text
             else f"**Ошибка:** {brief}"
         )
-        await dbase.add_message(chat_id, "assistant", saved)
+        try:
+            await dbase.add_message(chat_id, "assistant", saved)
+        except Exception:  # noqa: BLE001 — база недоступна: не подвешивать запуск
+            logger.exception("Не удалось сохранить сообщение об ошибке: chat %s", chat_id)
         run.finish("error", message=brief)
         return
-    # окно записи: отмена больше не действует (см. Run.begin_finish)
-    run.begin_finish()
-    if final_text:
-        await dbase.add_message(chat_id, "assistant", final_text)
-        await dbase.set_history(chat_id, json.loads(history_json))
     run.finish("done")
 
 
