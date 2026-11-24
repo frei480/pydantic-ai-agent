@@ -72,6 +72,20 @@ class Run:
             self.task.cancel()
         return True
 
+    def bind_task(self, task: asyncio.Task) -> None:
+        """Привязать фоновую задачу; страховка от вечного running.
+
+        Если задача завершилась, а терминальный статус не поставлен
+        (сбой самого обработчика, отмена не стартовавшей задачи),
+        запуск закрывается ошибкой — чат не остаётся «занятым».
+        """
+        self.task = task
+        task.add_done_callback(self._finish_if_running)
+
+    def _finish_if_running(self, task: asyncio.Task) -> None:
+        if self.status == "running":
+            self.finish("error", message="Запуск завершился без статуса")
+
 
 class RunRegistry:
     def __init__(self) -> None:

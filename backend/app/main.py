@@ -702,8 +702,10 @@ async def post_message(
         runs_registry.discard(run)
         raise
 
-    run.task = asyncio.create_task(
-        _execute_run(run, chat_id, content, chat.get("history_json", ""))
+    run.bind_task(
+        asyncio.create_task(
+            _execute_run(run, chat_id, content, chat.get("history_json", ""))
+        )
     )
     return RunStartedOut(run_id=run.id, chat=_chat_out(chat))
 

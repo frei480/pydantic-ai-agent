@@ -21,7 +21,7 @@ os.environ.setdefault(
     os.path.join(tempfile.gettempdir(), "test_runs_llm.log"),
 )
 
-from app import agent, auth, config, main  # noqa: E402
+from app import agent, auth, config, llm_errors, main  # noqa: E402
 from app.db import Database  # noqa: E402
 
 
@@ -220,6 +220,46 @@ async def check_reap_old_finished():
         assert registry.get(alive.id) is alive
     finally:
         runs.TERMINAL_KEEP_SECONDS = original
+
+
+async def check_task_escape_finishes_run():
+    """Страховка: задача кончилась, а запуск не завершён — статус error, не running.
+
+    Корутина может выйти без finish (сбой самого обработчика ошибки,
+    отмена не стартовавшей задачи) — запуск обязан закрыться, иначе чат
+    «занят» навсегда.
+    """
+    registry = runs.RunRegistry()
+
+    async def silent_exit():
+        return  # имитация: корутина вышла, не поставив терминальный статус
+
+    run = registry.register(1)
+    run.bind_task(asyncio.create_task(silent_exit()))
+    await asyncio.sleep(0.01)
+    assert run.status == "error", run.status
+
+    # отмена не стартовавшей задачи: в корутину не входит — страховка закрывает
+    run2 = registry.register(2)
+    task = asyncio.create_task(silent_exit())
+    task.cancel()
+    run2.bind_task(task)
+    await asyncio.sleep(0.01)
+    assert run2.status == "error", run2.status
+
+    # нормальное завершение: статус, поставленный корутиной, страховка не трогает
+    release = asyncio.Event()
+    run3 = registry.register(3)
+
+    async def normal_exit():
+        await release.wait()
+        run3.finish("done")
+
+    run3.bind_task(asyncio.create_task(normal_exit()))
+    release.set()
+    await asyncio.gather(run3.task, return_exceptions=True)
+    await asyncio.sleep(0.01)
+    assert run3.status == "done", run3.status
 
 
 async def check_post_returns_202_and_runs():
@@ -548,6 +588,7 @@ asyncio.run(check_busy_chat())
 asyncio.run(check_cancel_semantics())
 asyncio.run(check_heartbeat_not_buffered())
 asyncio.run(check_reap_old_finished())
+asyncio.run(check_task_escape_finishes_run())
 print("RUNS-REGISTRY-OK")
 asyncio.run(check_post_returns_202_and_runs())
 asyncio.run(check_survives_subscriber_close())
@@ -832,6 +873,63 @@ async def check_register_rollback_on_save_failure():
         restore()
 
 
+async def check_handler_failure_finishes_run():
+    """Сбой самого обработчика ошибки не оставляет чат «занятым».
+
+    Если except-ветка _execute_run сама падает (здесь — логирование),
+    задача завершается, не поставив терминальный статус. Страховка
+    (done-callback задачи) закрывает запуск ошибкой.
+    """
+    restore = install_pipeline([("raise", RuntimeError("провал провайдера"))])
+    original_log = llm_errors.log_llm_failure
+
+    def broken_log(*args, **kwargs):
+        raise ValueError("лог сломан")
+
+    llm_errors.log_llm_failure = broken_log
+    try:
+        async with app_env() as (database, client):
+            chat_id = await make_chat(client)
+            run_id = (
+                await client.post(
+                    f"/api/chats/{chat_id}/messages", json={"content": "вопрос"}
+                )
+            ).json()["run_id"]
+
+            run = main.runs_registry.get(run_id)
+            assert run is not None and run.task is not None
+            await asyncio.gather(run.task, return_exceptions=True)
+            assert run.status == "error", run.status
+            assert main.runs_registry.active_run_id(chat_id) is None
+
+            events = parse_sse(
+                (
+                    await client.get(
+                        f"/api/chats/{chat_id}/runs/{run_id}/events?from=0"
+                    )
+                ).text
+            )
+            assert events[-1]["type"] == "error", events
+
+            retry = await client.post(
+                f"/api/chats/{chat_id}/messages", json={"content": "снова"}
+            )
+            assert retry.status_code == 202, retry.text
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if main.runs_registry.active_run_id(chat_id) is None:
+                    break
+                await asyncio.sleep(0.02)
+            else:
+                raise AssertionError("второй запуск не завершился")
+            retry_run = main.runs_registry.get(retry.json()["run_id"])
+            if retry_run and retry_run.task:
+                await asyncio.gather(retry_run.task, return_exceptions=True)
+    finally:
+        llm_errors.log_llm_failure = original_log
+        restore()
+
+
 async def check_delete_chat_stops_run():
     gate = asyncio.Event()
     restore = install_pipeline([("wait", gate), ("event", FINAL)])
@@ -949,6 +1047,7 @@ asyncio.run(check_stop_finished_404())
 asyncio.run(check_stop_during_save())
 asyncio.run(check_stop_during_error_save())
 asyncio.run(check_register_rollback_on_save_failure())
+asyncio.run(check_handler_failure_finishes_run())
 asyncio.run(check_delete_chat_stops_run())
 asyncio.run(check_delete_chat_during_save())
 asyncio.run(check_shutdown_cancels_runs())
