@@ -566,7 +566,7 @@ function App() {
     runSeq.current = 0;
   };
 
-  const openChat = useCallback(async (chatId: number | null) => {
+  const openChat = useCallback(async (chatId: number | null): Promise<boolean> => {
     /** Единая точка открытия: прервать подписку → сообщения → активный запуск. */
     abortRunSubscription();
     setError("");
@@ -580,11 +580,11 @@ function App() {
       setMessages([]);
       setRunId(null);
       inputRef.current?.focus();
-      return;
+      return true;
     }
     try {
       const data = await api<{ chat: Chat; messages: ChatMessage[] }>(`/api/chats/${chatId}/messages`);
-      if (currentIdRef.current !== chatId) return;
+      if (currentIdRef.current !== chatId) return true;
       setCurrentTitle(data.chat.title);
       setMessages(data.messages);
       if (data.chat.active_run) {
@@ -593,17 +593,37 @@ function App() {
       } else {
         setRunId(null);
       }
+      return true;
     } catch (loadError) {
       setRunId(null);
       setError(`Не удалось открыть чат: ${errorMessage(loadError)}`);
+      return false;
     }
   }, [connectRun]);
 
+  // адрес хранит чат: «Назад»/«Вперёд» переключают его вместе с popstate
+  useEffect(() => {
+    const openByLocation = () => {
+      const match = window.location.pathname.match(/^\/chat\/(\d+)$/);
+      void openChat(match ? Number(match[1]) : null).then((ok) => {
+        if (!ok) {
+          window.history.replaceState({}, "", "/");
+          void openChat(null).then(() => setError("Чат не найден — открыт новый чат"));
+        }
+      });
+    };
+    openByLocation();
+    window.addEventListener("popstate", openByLocation);
+    return () => window.removeEventListener("popstate", openByLocation);
+  }, [openChat]);
+
   const selectChat = (chat: Chat) => {
+    window.history.pushState({}, "", `/chat/${chat.id}`);
     void openChat(chat.id);
   };
 
   const startNewChat = () => {
+    window.history.pushState({}, "", "/");
     void openChat(null);
   };
 
@@ -722,6 +742,9 @@ function App() {
         chatId = chat.id;
         setCurrentId(chat.id);
         currentIdRef.current = chat.id;
+        // адрес первого сообщения заменяет текущую запись — «Назад» не
+        // возвращает в пустой чат
+        window.history.replaceState({}, "", `/chat/${chat.id}`);
       }
 
       const response = await apiStream(`/api/chats/${chatId}/messages`, {
