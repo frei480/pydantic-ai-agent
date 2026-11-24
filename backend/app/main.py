@@ -99,6 +99,15 @@ async def lifespan(app: FastAPI):
     else:
         agent.configure_model(agent.ModelSettings(**settings))
     yield
+    # Штатная остановка без открытых потоков: отменяем фоновые запуски.
+    cancelled = runs_registry.cancel_all()
+    if cancelled:
+        logger.warning(
+            "Остановка сервера: отменено фоновых запусков: %d", len(cancelled)
+        )
+        await asyncio.gather(
+            *(r.task for r in cancelled if r.task), return_exceptions=True
+        )
     await dbase.close()
 
 
@@ -585,6 +594,8 @@ async def delete_chat(
     chat_id: int, login: str = Depends(auth.require_user)
 ) -> dict[str, bool]:
     await chat_for(login, chat_id)
+    # сначала останавливаем запуск чата и ждём его конца (до 5 с)
+    await runs_registry.stop_chat_run(chat_id)
     await dbase.delete_chat(chat_id)
     return {"ok": True}
 
@@ -711,3 +722,19 @@ async def get_run_events(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.delete("/api/chats/{chat_id}/runs/{run_id}")
+async def stop_run(
+    chat_id: int, run_id: str, login: str = Depends(auth.require_user)
+) -> dict[str, bool]:
+    """Остановить запуск; завершённый или неизвестный — 404."""
+    await chat_for(login, chat_id)
+    runs_registry.reap()
+    run = runs_registry.get(run_id)
+    if run is None or run.chat_id != chat_id:
+        raise HTTPException(status_code=404, detail="run not found")
+    if not run.cancel():
+        # в том числе окно записи ответа: запуск считается завершённым
+        raise HTTPException(status_code=404, detail="Запуск уже завершён")
+    return {"ok": True}

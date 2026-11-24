@@ -555,5 +555,236 @@ asyncio.run(check_active_run_in_list())
 asyncio.run(check_post_conflict())
 asyncio.run(check_concurrent_post_single_run())
 asyncio.run(check_error_saves_partial())
+async def check_stop_run():
+    gate = asyncio.Event()
+    restore = install_pipeline(
+        [
+            ("event", {"type": "phase", "phase": "research"}),
+            ("wait", gate),
+            ("event", FINAL),
+        ]
+    )
+    try:
+        async with app_env() as (database, client):
+            chat_id = await make_chat(client)
+            run_id = (
+                await client.post(
+                    f"/api/chats/{chat_id}/messages", json={"content": "вопрос"}
+                )
+            ).json()["run_id"]
+
+            response = await client.delete(f"/api/chats/{chat_id}/runs/{run_id}")
+            assert response.status_code == 200, response.text
+            assert response.json() == {"ok": True}, response.text
+
+            events = parse_sse(
+                (
+                    await client.get(
+                        f"/api/chats/{chat_id}/runs/{run_id}/events?from=0"
+                    )
+                ).text
+            )
+            assert events[-1]["type"] == "cancelled", events
+
+            messages = await database.get_messages(chat_id)
+            assert [m["role"] for m in messages] == ["user"], messages
+
+            again = await client.post(
+                f"/api/chats/{chat_id}/messages", json={"content": "снова"}
+            )
+            assert again.status_code == 202, again.text
+            gate.set()
+            await wait_for_answer(database, chat_id)
+    finally:
+        gate.set()
+        restore()
+
+
+async def check_stop_finished_404():
+    gate = asyncio.Event()
+    restore = install_pipeline([("wait", gate), ("event", FINAL)])
+    try:
+        async with app_env() as (database, client):
+            chat_id = await make_chat(client)
+            run_id = (
+                await client.post(
+                    f"/api/chats/{chat_id}/messages", json={"content": "вопрос"}
+                )
+            ).json()["run_id"]
+            gate.set()
+            await wait_for_answer(database, chat_id)
+
+            finished = await client.delete(f"/api/chats/{chat_id}/runs/{run_id}")
+            assert finished.status_code == 404, finished.text
+            unknown = await client.delete(
+                f"/api/chats/{chat_id}/runs/00000000-0000-0000-0000-000000000000"
+            )
+            assert unknown.status_code == 404, unknown.text
+    finally:
+        gate.set()
+        restore()
+
+
+async def wait_for_finishing(run_id, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        run = main.runs_registry.get(run_id)
+        if run is not None and run.finishing:
+            return run
+        await asyncio.sleep(0.02)
+    raise AssertionError("запуск не вошёл в окно записи ответа")
+
+
+async def check_stop_during_save():
+    save_gate = asyncio.Event()
+    restore = install_pipeline([("event", FINAL)])
+    try:
+        async with app_env() as (database, client):
+            orig_add = database.add_message
+
+            async def slow_add(chat_id, role, content):
+                if role == "assistant":
+                    await save_gate.wait()
+                return await orig_add(chat_id, role, content)
+
+            database.add_message = slow_add
+
+            chat_id = await make_chat(client)
+            run_id = (
+                await client.post(
+                    f"/api/chats/{chat_id}/messages", json={"content": "вопрос"}
+                )
+            ).json()["run_id"]
+            run = await wait_for_finishing(run_id)
+
+            # отмена в окне записи не действует
+            response = await client.delete(f"/api/chats/{chat_id}/runs/{run_id}")
+            assert response.status_code == 404, response.text
+
+            save_gate.set()
+            messages = await wait_for_answer(database, chat_id)
+            assert messages[-1]["content"] == "готовый ответ", messages
+            assert run.status == "done", run.status
+    finally:
+        save_gate.set()
+        restore()
+
+
+async def check_delete_chat_stops_run():
+    gate = asyncio.Event()
+    restore = install_pipeline([("wait", gate), ("event", FINAL)])
+    try:
+        async with app_env() as (database, client):
+            chat_id = await make_chat(client)
+            run_id = (
+                await client.post(
+                    f"/api/chats/{chat_id}/messages", json={"content": "вопрос"}
+                )
+            ).json()["run_id"]
+
+            response = await client.delete(f"/api/chats/{chat_id}")
+            assert response.status_code == 200, response.text
+
+            deadline = time.monotonic() + 6.0
+            while time.monotonic() < deadline:
+                if main.runs_registry.active_run_id(chat_id) is None:
+                    break
+                await asyncio.sleep(0.02)
+            else:
+                raise AssertionError("запуск не остановлен после удаления чата")
+            run = main.runs_registry.get(run_id)
+            assert run is None or run.status == "cancelled", run and run.status
+
+            gone = await client.get(f"/api/chats/{chat_id}/messages")
+            assert gone.status_code == 404, gone.text
+    finally:
+        gate.set()
+        restore()
+
+
+async def check_delete_chat_during_save():
+    save_gate = asyncio.Event()
+    restore = install_pipeline([("event", FINAL)])
+    try:
+        async with app_env() as (database, client):
+            orig_add = database.add_message
+
+            async def slow_add(chat_id, role, content):
+                if role == "assistant":
+                    await save_gate.wait()
+                return await orig_add(chat_id, role, content)
+
+            database.add_message = slow_add
+
+            chat_id = await make_chat(client)
+            run_id = (
+                await client.post(
+                    f"/api/chats/{chat_id}/messages", json={"content": "вопрос"}
+                )
+            ).json()["run_id"]
+            run = await wait_for_finishing(run_id)
+
+            # удаление чата в окне записи: ждёт записи, не рвёт её, не падает по FK
+            delete_task = asyncio.create_task(client.delete(f"/api/chats/{chat_id}"))
+            await asyncio.sleep(0.05)  # обработчик дошёл до ожидания останова
+            save_gate.set()
+            response = await asyncio.wait_for(delete_task, timeout=8)
+            assert response.status_code == 200, response.text
+
+            await asyncio.wait_for(asyncio.shield(run.task), timeout=5)
+            assert run.status == "done", run.status
+            assert run.task.exception() is None, run.task.exception()
+            assert await database.get_chat(chat_id) is None
+            assert await database.get_messages(chat_id) == []
+    finally:
+        save_gate.set()
+        restore()
+
+
+async def check_shutdown_cancels_runs():
+    gate1 = asyncio.Event()
+    gate2 = asyncio.Event()
+    original = agent.run_pipeline
+    gates = [gate1, gate2]
+
+    async def fake_pipeline(user_text, history_json):
+        gate = gates.pop(0) if gates else gate1
+        await gate.wait()
+        yield FINAL
+
+    agent.run_pipeline = fake_pipeline
+    try:
+        async with app_env() as (database, client):
+            chat_ids = [await make_chat(client), await make_chat(client)]
+            for chat_id in chat_ids:
+                response = await client.post(
+                    f"/api/chats/{chat_id}/messages", json={"content": "вопрос"}
+                )
+                assert response.status_code == 202, response.text
+            # тик на старт задач: отмена не-стартовавшей задачи не входит
+            # в корутину — а в проде POST уже вернулся, значит задача стартовала
+            await asyncio.sleep(0.05)
+
+            cancelled = main.runs_registry.cancel_all()
+            assert len(cancelled) == 2, [r.id for r in cancelled]
+            await asyncio.gather(
+                *(r.task for r in cancelled if r.task), return_exceptions=True
+            )
+            assert all(r.status == "cancelled" for r in cancelled)
+            for chat_id in chat_ids:
+                messages = await database.get_messages(chat_id)
+                assert [m["role"] for m in messages] == ["user"], messages
+    finally:
+        agent.run_pipeline = original
+        gate1.set()
+        gate2.set()
+
+
 asyncio.run(check_rights_runs_routes())
+asyncio.run(check_stop_run())
+asyncio.run(check_stop_finished_404())
+asyncio.run(check_stop_during_save())
+asyncio.run(check_delete_chat_stops_run())
+asyncio.run(check_delete_chat_during_save())
+asyncio.run(check_shutdown_cancels_runs())
 print("RUNS-API-OK")
