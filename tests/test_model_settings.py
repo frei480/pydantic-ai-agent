@@ -177,6 +177,17 @@ def check_settings_validation():
     )
     assert valid.model == "custom-model"
     assert valid.base_url == "http://localhost:8000/v1"
+    # адрес не передан — те же правила, что и для пустого адреса
+    try:
+        main.ModelSettingsIn(provider="custom", model="custom-model")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("custom without base_url was accepted")
+    assert (
+        main.ModelSettingsIn(provider="openrouter", model="openai/gpt-4o-mini").base_url
+        == "https://openrouter.ai/api/v1"
+    )
     assert (
         main.ModelSettingsIn(
             provider="ollama", model="qwen2.5:7b", base_url=""

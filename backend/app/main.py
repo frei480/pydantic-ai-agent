@@ -16,7 +16,7 @@ from fastapi.openapi.docs import (
     get_swagger_ui_oauth2_redirect_html,
 )
 from fastapi.responses import StreamingResponse
-from openai import APIError
+from openai import APIConnectionError, APIError, APIStatusError
 
 from . import agent, auth, db, llm_errors, runs
 from .admin_content import AdminContentStore, skill_metadata
@@ -48,6 +48,8 @@ from .model import (
     IndexedPageSearchResultOut,
     MessageIn,
     ModelHealthOut,
+    ModelListIn,
+    ModelListOut,
     ModelSettingsIn,
     RunStartedOut,
     SkillContentIn,
@@ -215,6 +217,26 @@ def _provider_error_message(exc: Exception) -> str:
             "Провайдер ограничил запросы (HTTP 429). Проверьте квоту, баланс "
             "и доступность выбранной модели."
         )
+    return str(exc)[:500]
+
+
+def _model_list_error_message(exc: Exception) -> str:
+    if isinstance(exc, APIConnectionError):  # включая APITimeoutError
+        return (
+            "Не удалось подключиться к API-адресу за "
+            f"{agent.MODELS_LIST_TIMEOUT_SECONDS:g} секунд. "
+            "Проверьте адрес и доступность провайдера."
+        )
+    if isinstance(exc, APIStatusError):
+        if exc.status_code in {401, 403}:
+            return f"Провайдер не принял API-ключ (HTTP {exc.status_code}). Проверьте ключ."
+        if exc.status_code == 404:
+            return (
+                "По этому адресу нет списка моделей (HTTP 404). "
+                "Введите название модели вручную."
+            )
+        if exc.status_code == 429:
+            return _provider_error_message(exc)
     return str(exc)[:500]
 
 
@@ -526,6 +548,43 @@ async def update_settings(
         _model_health_cache = None
         _model_health_checked_at = 0.0
     return _settings_out(settings)
+
+
+@app.post("/api/settings/models")
+async def list_provider_models(
+    body: ModelListIn, _: str = Depends(auth.require_admin_user)
+) -> ModelListOut:
+    current = agent.current_model_settings()
+    if body.clear_api_key and body.api_key:
+        raise HTTPException(
+            status_code=400, detail="Нельзя одновременно заменить и удалить API-ключ"
+        )
+    # Адрес из тела уже нормализован проверкой; сохранённый может быть с «/» в конце.
+    same_target = body.provider == current.provider and (body.base_url or "") == (
+        current.base_url or ""
+    ).rstrip("/")
+    api_key = (
+        ""
+        if body.clear_api_key
+        else body.api_key
+        if body.api_key
+        else current.api_key
+        if same_target
+        else ""
+    )
+    settings = agent.ModelSettings(
+        provider=body.provider, model=current.model, api_key=api_key, base_url=body.base_url
+    )
+    try:
+        return {"models": await agent.list_models(settings)}
+    except agent.ModelListError as exc:
+        logger.warning("Список моделей не получен (provider=%s): %s", body.provider, exc)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except APIError as exc:
+        logger.warning(
+            "Список моделей не получен (provider=%s): %s", body.provider, type(exc).__name__
+        )
+        raise HTTPException(status_code=502, detail=_model_list_error_message(exc)) from exc
 
 
 @app.get("/api/health/model")

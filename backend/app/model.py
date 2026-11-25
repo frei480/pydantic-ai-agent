@@ -50,6 +50,10 @@ class SettingsOut(TypedDict):
     max_critic_response_tokens: int
 
 
+class ModelListOut(TypedDict):
+    models: list[str]
+
+
 class ChatOut(TypedDict):
     id: int
     title: str
@@ -130,29 +134,16 @@ class IndexedPageSearchOut(BaseModel):
     results: list[IndexedPageSearchResultOut]
 
 
-class ModelSettingsIn(BaseModel):
+class ConnectionIn(BaseModel):
+    """Провайдер, адрес и ключ — общее у сохранения настроек и запроса списка моделей."""
+
     provider: Literal["openai", "openrouter", "ollama", "lmstudio", "custom"]
-    model: str = Field(min_length=1, max_length=200)
-    base_url: str | None = Field(default=None, max_length=2048)
+    # validate_default: если адреса в теле нет, действуют те же правила, что для пустого
+    base_url: str | None = Field(
+        default=None, max_length=2048, validate_default=True
+    )
     api_key: str | None = Field(default=None, max_length=4096)
     clear_api_key: bool = False
-    context_window_tokens: int = Field(
-        default=DEFAULT_CONTEXT_WINDOW_TOKENS, ge=4096, le=2_000_000
-    )
-    max_agent_response_tokens: int = Field(
-        default=MAX_AGENT_RESPONSE_TOKENS, ge=256, le=32_768
-    )
-    max_critic_response_tokens: int = Field(
-        default=MAX_CRITIC_RESPONSE_TOKENS, ge=256, le=16_384
-    )
-
-    @field_validator("model")
-    @classmethod
-    def validate_model(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("Укажите название модели")
-        return value
 
     @field_validator("base_url")
     @classmethod
@@ -184,6 +175,31 @@ class ModelSettingsIn(BaseModel):
     @classmethod
     def trim_api_key(cls, value: str | None) -> str | None:
         return value.strip() if value is not None else None
+
+
+class ModelListIn(ConnectionIn):
+    """Тело запроса списка моделей."""
+
+
+class ModelSettingsIn(ConnectionIn):
+    model: str = Field(min_length=1, max_length=200)
+    context_window_tokens: int = Field(
+        default=DEFAULT_CONTEXT_WINDOW_TOKENS, ge=4096, le=2_000_000
+    )
+    max_agent_response_tokens: int = Field(
+        default=MAX_AGENT_RESPONSE_TOKENS, ge=256, le=32_768
+    )
+    max_critic_response_tokens: int = Field(
+        default=MAX_CRITIC_RESPONSE_TOKENS, ge=256, le=16_384
+    )
+
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Укажите название модели")
+        return value
 
 
 class AdminLoginIn(BaseModel):
