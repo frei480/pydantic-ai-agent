@@ -568,6 +568,51 @@ async def probe_model() -> bool:
         await provider.client.close()
 
 
+MODELS_LIST_TIMEOUT_SECONDS = 10.0
+MODELS_LIST_MAX_PAGES = 50
+
+
+class ModelListError(Exception):
+    """Провайдер ответил, но не списком моделей (например, HTML вместо JSON)."""
+
+
+async def list_models(settings: ModelSettings) -> list[str]:
+    """ID моделей, которые провайдер отдаёт по GET /models, — без повторов и по алфавиту.
+
+    Соединение и статусы провайдера не перехватывает: маршрут переводит их в понятный текст.
+    """
+    provider = _build_provider(settings)
+    try:
+        client = provider.client.with_options(max_retries=0)
+        ids: list[str] = []
+        after: str | None = None
+        for _ in range(MODELS_LIST_MAX_PAGES):
+            try:
+                page = await client.models.list(
+                    timeout=MODELS_LIST_TIMEOUT_SECONDS,
+                    extra_query={"after": after} if after else None,
+                )
+            except AttributeError as exc:
+                # SDK не смог разобрать ответ не-JSON (HTML от веб-сервера и т. п.)
+                raise ModelListError(
+                    "Провайдер вернул не список моделей. Проверьте API-адрес."
+                ) from exc
+            page_ids = [
+                item.id
+                for item in (getattr(page, "data", None) or [])
+                if getattr(item, "id", None)
+            ]
+            if not page_ids:
+                break
+            ids.extend(page_ids)
+            if not getattr(page, "has_more", False):
+                break
+            after = getattr(page, "last_id", None) or page_ids[-1]
+        return sorted(dict.fromkeys(ids), key=str.lower)
+    finally:
+        await provider.client.close()
+
+
 # -------------------------------------------------------------------
 # Инструменты
 # -------------------------------------------------------------------

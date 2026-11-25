@@ -5,12 +5,17 @@
   2 — текстовый черновик,
   3 — structured-вердикт критика (final_result),
   4+ — финальный текст.
+
+GET …/models — список моделей; сценарий задаётся переменными MOCK_MODELS*
+(см. tests/test_model_list.py).
 """
 import json
 import os
 import sys
+import time
 
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import parse_qs, urlsplit
 
 state = {"turn": 0, "failures_remaining": int(os.getenv("MOCK_502_FAILURES", "0"))}
 
@@ -278,6 +283,69 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
                 self.wfile.write(payload)
+
+    def _respond(self, status, content_type, body):
+        # Клиент мог уйти по таймауту (MOCK_MODELS_DELAY) — это не ошибка теста.
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except OSError:
+            pass
+
+    def _models_page(self, query):
+        ids = [item.strip() for item in os.getenv("MOCK_MODELS", "mock-model").split(",")]
+        # Пустой элемент — запись без id (провайдер вернул мусор).
+        data = [
+            {"id": model, "object": "model", "created": 0, "owned_by": "mock"}
+            if model
+            else {"object": "model", "created": 0, "owned_by": "mock"}
+            for model in ids
+        ]
+        has_more = False
+        page_size = int(os.getenv("MOCK_MODELS_PAGE_SIZE", "0") or 0)
+        if page_size:
+            start = 0
+            after = (parse_qs(query).get("after") or [""])[0]
+            if after and os.getenv("MOCK_MODELS_IGNORE_AFTER") != "1":
+                start = next((i for i, model in enumerate(ids) if model == after), -1) + 1
+            data = data[start : start + page_size]
+            has_more = start + page_size < len(ids)
+        return {
+            "object": "list",
+            "data": data,
+            "has_more": has_more,
+            "first_id": data[0].get("id") if data else None,
+            "last_id": data[-1].get("id") if data else None,
+        }
+
+    def do_GET(self):
+        state["models_requests"] = state.get("models_requests", 0) + 1
+        state["models_auth"] = self.headers.get("Authorization")
+        if os.getenv("MOCK_MODELS_DELAY"):
+            time.sleep(float(os.getenv("MOCK_MODELS_DELAY", "0")))
+        url = urlsplit(self.path)
+        status, content_type = 200, "application/json"
+        if not url.path.endswith("/models"):
+            status, payload = 404, {"error": {"message": "Not found"}}
+        elif os.getenv("MOCK_MODELS_STATUS"):
+            status = int(os.getenv("MOCK_MODELS_STATUS", "500"))
+            payload = {
+                "error": {
+                    "message": "MOCK-MODELS-STATUS",
+                    "type": "provider_unavailable",
+                    "code": status,
+                }
+            }
+        elif os.getenv("MOCK_MODELS_RAW_HTML") == "1":
+            # Веб-сервер вместо API: 200, но не JSON
+            self._respond(200, "text/html", b"<html>not json</html>")
+            return
+        else:
+            payload = self._models_page(url.query)
+        self._respond(status, content_type, json.dumps(payload).encode())
 
 
 def serve(port=3999):
