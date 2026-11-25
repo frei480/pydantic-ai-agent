@@ -29,6 +29,7 @@ import {
 } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { ModelCombobox, type ModelListStatus } from "./ModelCombobox";
 
 type Chat = {
   id: number;
@@ -90,6 +91,8 @@ type SettingsForm = {
   max_critic_response_tokens: number;
 };
 
+type ModelListOut = { models: string[] };
+
 const providerOptions: { value: Provider; label: string }[] = [
   { value: "openai", label: "OpenAI" },
   { value: "openrouter", label: "OpenRouter" },
@@ -105,6 +108,13 @@ const providerDefaults: Record<Provider, { base_url: string; model: string }> = 
   lmstudio: { base_url: "http://host.docker.internal:1234/v1", model: "local-model" },
   custom: { base_url: "", model: "" },
 };
+
+const MODEL_LIST_TIMEOUT_MS = 20_000;
+
+/** Провайдер, адрес и ключ формы — по ним решается, нужно ли грузить список моделей заново. */
+function connectionKey(form: SettingsForm): string {
+  return JSON.stringify([form.provider, form.base_url, form.api_key, form.clear_api_key]);
+}
 
 const suggestions = [
   {
@@ -160,8 +170,17 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   if (!response.ok) {
     let detail = `${response.status} ${response.statusText}`;
     try {
-      const body = (await response.json()) as { detail?: string };
-      detail = body.detail || detail;
+      const body = (await response.json()) as {
+        detail?: string | { msg?: string }[];
+      };
+      // 422 FastAPI — список ошибок проверки: показываем их текст, а не «[object Object]»
+      const detailBody = Array.isArray(body.detail)
+        ? body.detail
+            .map((item) => (item?.msg ?? "").replace(/^Value error, /, ""))
+            .filter(Boolean)
+            .join("; ")
+        : body.detail;
+      detail = detailBody || detail;
     } catch {
       // Non-JSON error responses use the HTTP status as their message.
     }
@@ -243,6 +262,11 @@ function App() {
     max_agent_response_tokens: 4096,
     max_critic_response_tokens: 2048,
   });
+  const [modelOptions, setModelOptions] = useState<string[]>([]);
+  const [modelListStatus, setModelListStatus] = useState<ModelListStatus>("idle");
+  const [modelListError, setModelListError] = useState("");
+  const modelListRequest = useRef(0); // номер последнего отправленного запроса списка
+  const modelListTarget = useRef(""); // connectionKey формы последнего отправленного запроса
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const activityId = useRef(0);
@@ -665,6 +689,68 @@ function App() {
     }
   };
 
+  // ---- список моделей провайдера ----
+  // Сброс: прежний список мог относиться к другим провайдеру, адресу или ключу.
+  const resetModelList = () => {
+    modelListRequest.current += 1; // ответ прежнего запроса больше не применяется
+    modelListTarget.current = "";
+    setModelOptions([]);
+    setModelListStatus("idle");
+    setModelListError("");
+  };
+
+  const requestModelList = async (form: SettingsForm) => {
+    const request = ++modelListRequest.current;
+    modelListTarget.current = connectionKey(form);
+    setModelListStatus("loading");
+    setModelListError("");
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), MODEL_LIST_TIMEOUT_MS);
+    try {
+      const data = await api<ModelListOut>("/api/settings/models", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider: form.provider,
+          base_url: form.base_url,
+          api_key: form.api_key || undefined,
+          clear_api_key: form.clear_api_key,
+        }),
+        signal: controller.signal,
+      });
+      if (request !== modelListRequest.current) return;
+      setModelOptions(data.models);
+      setModelListStatus("ready");
+    } catch (requestError) {
+      if (request !== modelListRequest.current) return;
+      setModelOptions([]);
+      setModelListStatus("error");
+      setModelListError(
+        requestError instanceof DOMException && requestError.name === "AbortError"
+          ? "сервер не ответил вовремя"
+          : errorMessage(requestError)
+      );
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  };
+
+  // «API-адрес» и «API-ключ» меняются только через эту функцию: список сразу сбрасывается
+  const changeConnection = (patch: Partial<SettingsForm>) => {
+    resetModelList();
+    setSettings((current) => ({ ...current, ...patch }));
+  };
+
+  // Уход из «API-адреса» или «API-ключа»: значение изменилось — грузим список заново
+  const reloadModelListIfConnectionChanged = () => {
+    if (connectionKey(settings) !== modelListTarget.current) void requestModelList(settings);
+  };
+
+  const toggleClearApiKey = (checked: boolean) => {
+    changeConnection({ clear_api_key: checked, api_key: "" });
+    void requestModelList({ ...settings, clear_api_key: checked, api_key: "" });
+  };
+
   const openSettings = async () => {
     setSettingsOpen(true);
     setSettingsLoading(true);
@@ -672,14 +758,16 @@ function App() {
     setSettingsSuccess("");
     try {
       const current = await api<ModelSettings>("/api/settings");
-      setSettings({
+      const form: SettingsForm = {
         ...current,
         api_key: "",
         clear_api_key: false,
         max_agent_response_tokens: current.max_agent_response_tokens || 4096,
         max_critic_response_tokens: current.max_critic_response_tokens || 2048,
-      });
+      };
+      setSettings(form);
       setHasSavedApiKey(current.api_key_configured);
+      void requestModelList(form);
     } catch (loadError) {
       setSettingsError(`Не удалось загрузить настройки: ${errorMessage(loadError)}`);
     } finally {
@@ -727,15 +815,18 @@ function App() {
   const chooseProvider = (provider: Provider) => {
     const currentDefault = providerDefaults[settings.provider];
     const useNewDefaults = !settings.base_url || settings.base_url === currentDefault.base_url;
-    setSettings((current) => ({
-      ...current,
+    const next: SettingsForm = {
+      ...settings,
       provider,
-      base_url: useNewDefaults ? providerDefaults[provider].base_url : current.base_url,
+      base_url: useNewDefaults ? providerDefaults[provider].base_url : settings.base_url,
       model:
-        !current.model || current.model === currentDefault.model
+        !settings.model || settings.model === currentDefault.model
           ? providerDefaults[provider].model
-          : current.model,
-    }));
+          : settings.model,
+    };
+    resetModelList();
+    setSettings(next);
+    void requestModelList(next);
   };
 
   const deleteChat = async (event: MouseEvent<HTMLButtonElement>, chat: Chat) => {
@@ -1297,17 +1388,66 @@ function App() {
                 </label>
 
                 <label className="block">
-                  <span className="mb-1.5 block text-xs font-medium text-slate-700">Модель</span>
+                  <span className="mb-1.5 block text-xs font-medium text-slate-700">API-адрес</span>
                   <input
-                    required
-                    maxLength={200}
-                    value={settings.model}
-                    onChange={(event) => setSettings((current) => ({ ...current, model: event.target.value }))}
-                    placeholder="Например, gpt-4o-mini"
+                    type="url"
+                    maxLength={2048}
+                    value={settings.base_url}
+                    onChange={(event) => changeConnection({ base_url: event.target.value })}
+                    onBlur={reloadModelListIfConnectionChanged}
+                    placeholder="По умолчанию для OpenAI"
                     disabled={settingsSaving}
                     className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-xs text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50"
                   />
+                  <span className="mt-1 block text-[10px] leading-4 text-slate-400">
+                    Для Ollama и LM Studio в Docker используйте host.docker.internal. В LM Studio укажите ID
+                    загруженной модели.
+                  </span>
                 </label>
+
+                <label className="block">
+                  <span className="mb-1.5 block text-xs font-medium text-slate-700">API-ключ</span>
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    maxLength={4096}
+                    value={settings.api_key}
+                    onChange={(event) =>
+                      changeConnection({ api_key: event.target.value, clear_api_key: false })
+                    }
+                    onBlur={reloadModelListIfConnectionChanged}
+                    placeholder={hasSavedApiKey ? "Ключ сохранён — введите новый, чтобы заменить" : "Введите API-ключ"}
+                    disabled={settingsSaving || settings.clear_api_key}
+                    className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-xs text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50"
+                  />
+                  <span className="mt-1 block text-[10px] leading-4 text-slate-400">
+                    Ключ хранится на сервере и не передаётся обратно в браузер.
+                  </span>
+                </label>
+
+                {hasSavedApiKey && (
+                  <label className="flex cursor-pointer items-center gap-2 text-[11px] text-slate-600">
+                    <input
+                      type="checkbox"
+                      checked={settings.clear_api_key}
+                      onChange={(event) => toggleClearApiKey(event.target.checked)}
+                      disabled={settingsSaving}
+                      className="h-3.5 w-3.5 rounded border-slate-300 accent-[#315fce]"
+                    />
+                    Удалить сохранённый ключ
+                  </label>
+                )}
+
+                <ModelCombobox
+                  id="settings-model"
+                  value={settings.model}
+                  onChange={(model) => setSettings((current) => ({ ...current, model }))}
+                  options={modelOptions}
+                  status={modelListStatus}
+                  error={modelListError}
+                  onRefresh={() => void requestModelList(settings)}
+                  disabled={settingsSaving}
+                />
 
                 <label className="block">
                   <span className="mb-1.5 block text-xs font-medium text-slate-700">
@@ -1374,65 +1514,6 @@ function App() {
                     className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-xs text-slate-800 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50"
                   />
                 </label>
-
-                <label className="block">
-                  <span className="mb-1.5 block text-xs font-medium text-slate-700">API-адрес</span>
-                  <input
-                    type="url"
-                    maxLength={2048}
-                    value={settings.base_url}
-                    onChange={(event) => setSettings((current) => ({ ...current, base_url: event.target.value }))}
-                    placeholder="По умолчанию для OpenAI"
-                    disabled={settingsSaving}
-                    className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-xs text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50"
-                  />
-                  <span className="mt-1 block text-[10px] leading-4 text-slate-400">
-                    Для Ollama и LM Studio в Docker используйте host.docker.internal. В LM Studio укажите ID
-                    загруженной модели.
-                  </span>
-                </label>
-
-                <label className="block">
-                  <span className="mb-1.5 block text-xs font-medium text-slate-700">API-ключ</span>
-                  <input
-                    type="password"
-                    autoComplete="new-password"
-                    maxLength={4096}
-                    value={settings.api_key}
-                    onChange={(event) =>
-                      setSettings((current) => ({
-                        ...current,
-                        api_key: event.target.value,
-                        clear_api_key: false,
-                      }))
-                    }
-                    placeholder={hasSavedApiKey ? "Ключ сохранён — введите новый, чтобы заменить" : "Введите API-ключ"}
-                    disabled={settingsSaving || settings.clear_api_key}
-                    className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-xs text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50"
-                  />
-                  <span className="mt-1 block text-[10px] leading-4 text-slate-400">
-                    Ключ хранится на сервере и не передаётся обратно в браузер.
-                  </span>
-                </label>
-
-                {hasSavedApiKey && (
-                  <label className="flex cursor-pointer items-center gap-2 text-[11px] text-slate-600">
-                    <input
-                      type="checkbox"
-                      checked={settings.clear_api_key}
-                      onChange={(event) =>
-                        setSettings((current) => ({
-                          ...current,
-                          clear_api_key: event.target.checked,
-                          api_key: "",
-                        }))
-                      }
-                      disabled={settingsSaving}
-                      className="h-3.5 w-3.5 rounded border-slate-300 accent-[#315fce]"
-                    />
-                    Удалить сохранённый ключ
-                  </label>
-                )}
 
                 <div className="rounded-lg border border-amber-100 bg-amber-50/70 px-3 py-2.5 text-[10px] leading-[1.6] text-amber-800">
                   Эти настройки общие для сервера. API-ключ хранится в локальной базе данных без шифрования;
